@@ -1,0 +1,15 @@
+{:paths ["src"]
+ ;; langchain-clj is the only dependency (itself zero-dep, all .cljc):
+ ;; it provides langchain.db (the Datomic-API-compatible store backing
+ ;; the node cache / run history) and the optional ChatModel node pack.
+ :deps {io.github.com-junkawasaki/langchain-clj
+        {:git/tag "v0.1.0" :git/sha "ae475c9"}}
+ :aliases
+ {:test {:extra-paths ["test"]
+         :extra-deps {io.github.cognitect-labs/test-runner
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts ["-m" "cognitect.test-runner"]
+         :exec-fn cognitect.test-runner.api/test}
+  ;; local checkout for workspace development (orgs/com-junkawasaki/*)
+  :dev {:override-deps {io.github.com-junkawasaki/langchain-clj
+                        {:local/root "../langchain-clj"}}}}}
