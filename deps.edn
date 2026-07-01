@@ -1,15 +1,23 @@
 {:paths ["src"]
- ;; langchain-clj is the only dependency (itself zero-dep, all .cljc):
- ;; it provides langchain.db (the Datomic-API-compatible store backing
- ;; the node cache / run history) and the optional ChatModel node pack.
- :deps {io.github.com-junkawasaki/langchain-clj
-        {:git/tag "v0.1.0" :git/sha "ae475c9"}}
+ ;; langchain (kotoba-lang) provides langchain.db (the Datomic-API-compatible
+ ;; store backing the node cache / run history), the optional ChatModel node
+ ;; pack, and langchain.jvm (the http-kit/jsonista host-fn wiring
+ ;; comfyui.gateway's JVM branch uses). Only THIRD-PARTY dep by design;
+ ;; comfyui.gateway's own http-kit/jsonista need is JVM-only (behind #?(:clj
+ ;; ...) reader conditionals) and left for consumers to bring themselves
+ ;; (every current consumer already declares them for its own server needs)
+ ;; -- see the :test alias for how this repo's own tests supply them.
+ :deps {io.github.kotoba-lang/langchain
+        {:git/sha "c74e358c486bdbbed415261abe352ae73831bb8e"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
-                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}
+                      ;; comfyui.gateway-test exercises the JVM :clj branch
+                      http-kit/http-kit {:mvn/version "2.8.0"}
+                      metosin/jsonista  {:mvn/version "0.3.11"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
-  ;; local checkout for workspace development (orgs/com-junkawasaki/*)
-  :dev {:override-deps {io.github.com-junkawasaki/langchain-clj
-                        {:local/root "../langchain-clj"}}}}}
+  ;; local checkout for workspace development (orgs/kotoba-lang/*)
+  :dev {:override-deps {io.github.kotoba-lang/langchain
+                        {:local/root "../langchain"}}}}}
