@@ -36,6 +36,18 @@
       :batch_size {:type "INT" :default 1}}
      [{:name "LATENT" :type "LATENT"}]))
 
+(def empty-ltxv-latent-video
+  (t "EmptyLTXVLatentVideo" "latent/video"
+     {:width {:type "INT" :default 704} :height {:type "INT" :default 480}
+      :length {:type "INT" :default 97} :batch_size {:type "INT" :default 1}}
+     [{:name "LATENT" :type "LATENT"}]))
+
+(def ltxv-conditioning
+  (t "LTXVConditioning" "conditioning/video"
+     {:positive {:type "CONDITIONING"} :negative {:type "CONDITIONING"}
+      :frame_rate {:type "FLOAT" :default 25.0}}
+     [{:name "positive" :type "CONDITIONING"} {:name "negative" :type "CONDITIONING"}]))
+
 (def empty-latent-audio
   (t "EmptyLatentAudio" "latent/audio"
      {:seconds {:type "FLOAT" :default 10.0}}
@@ -95,6 +107,7 @@
   "The diffusion node pack — register alongside comfyui.std to validate
   image/video/audio workflows."
   [checkpoint-loader image-only-checkpoint-loader clip-text-encode
-   empty-latent-image empty-latent-audio ksampler svd-conditioning
+   empty-latent-image empty-latent-audio empty-ltxv-latent-video
+   ltxv-conditioning ksampler svd-conditioning
    vae-decode vae-decode-audio load-image save-image save-animated-webp
    save-audio])
