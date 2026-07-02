@@ -23,7 +23,7 @@
   (t "ImageOnlyCheckpointLoader" "loaders"
      {:ckpt_name {:type "STRING"}}
      [{:name "MODEL" :type "MODEL"} {:name "CLIP_VISION" :type "CLIP_VISION"}
-      {:name "VAE" :type "VAE"} {:name "CLIP_VISION2" :type "CLIP_VISION"}]))
+      {:name "VAE" :type "VAE"}]))
 
 (def clip-text-encode
   (t "CLIPTextEncode" "conditioning"

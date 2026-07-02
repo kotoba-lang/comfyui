@@ -28,7 +28,7 @@
   {"1" {:class_type "ImageOnlyCheckpointLoader" :inputs {:ckpt_name "svd_xt.safetensors"}}
    "2" {:class_type "LoadImage" :inputs {:image "seed.png"}}
    "4" {:class_type "SVD_img2vid_Conditioning"
-        :inputs {:clip_vision ["1" 3] :init_image ["2" 0] :vae ["1" 2]
+        :inputs {:clip_vision ["1" 1] :init_image ["2" 0] :vae ["1" 2]
                  :width 640 :height 640 :video_frames 48 :motion_bucket_id 127
                  :fps 16 :augmentation_level 0.0}}
    "5" {:class_type "KSampler" :inputs {:model ["1" 0] :positive ["4" 0] :negative ["4" 1]
