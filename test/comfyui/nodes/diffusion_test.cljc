@@ -50,6 +50,23 @@
    "6" {:class_type "VAEDecodeAudio" :inputs {:samples ["5" 0] :vae ["1" 2]}}
    "7" {:class_type "SaveAudio" :inputs {:audio ["6" 0] :filename_prefix "murakumo-aud"}}})
 
+(def ltxv-workflow
+  {"1" {:class_type "CheckpointLoaderSimple" :inputs {:ckpt_name "ltx-video-2b-v0.9.1.safetensors"}}
+   "2" {:class_type "CLIPTextEncode" :inputs {:clip ["1" 1] :text "a cloud spirit"}}
+   "3" {:class_type "CLIPTextEncode" :inputs {:clip ["1" 1] :text "blurry"}}
+   "4" {:class_type "EmptyLTXVLatentVideo" :inputs {:width 704 :height 480 :length 97 :batch_size 1}}
+   "5" {:class_type "LTXVConditioning" :inputs {:positive ["2" 0] :negative ["3" 0] :frame_rate 24}}
+   "6" {:class_type "KSampler" :inputs {:model ["1" 0] :positive ["5" 0] :negative ["5" 1]
+                                        :latent_image ["4" 0] :seed 1 :steps 24 :cfg 3.0
+                                        :sampler_name "euler" :scheduler "normal" :denoise 1.0}}
+   "7" {:class_type "VAEDecode" :inputs {:samples ["6" 0] :vae ["1" 2]}}
+   "8" {:class_type "SaveAnimatedWEBP" :inputs {:images ["7" 0] :filename_prefix "murakumo-ltx"
+                                                :fps 24 :lossless false :quality 85 :method "default"}}})
+
+(deftest validates-ltxv
+  (let [{:keys [valid? errors]} (wf/validate reg ltxv-workflow)]
+    (is valid? (str "LTX errors: " (pr-str errors)))))
+
 (deftest validates-image
   (let [{:keys [valid? errors]} (wf/validate reg sdxl-workflow)]
     (is valid? (str "SDXL errors: " (pr-str errors)))))
