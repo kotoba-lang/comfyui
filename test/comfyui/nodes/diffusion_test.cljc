@@ -52,8 +52,9 @@
 
 (def ltxv-workflow
   {"1" {:class_type "CheckpointLoaderSimple" :inputs {:ckpt_name "ltx-video-2b-v0.9.1.safetensors"}}
-   "2" {:class_type "CLIPTextEncode" :inputs {:clip ["1" 1] :text "a cloud spirit"}}
-   "3" {:class_type "CLIPTextEncode" :inputs {:clip ["1" 1] :text "blurry"}}
+   "9" {:class_type "CLIPLoader" :inputs {:clip_name "t5xxl_fp8_e4m3fn.safetensors" :type "ltxv"}}
+   "2" {:class_type "CLIPTextEncode" :inputs {:clip ["9" 0] :text "a cloud spirit"}}
+   "3" {:class_type "CLIPTextEncode" :inputs {:clip ["9" 0] :text "blurry"}}
    "4" {:class_type "EmptyLTXVLatentVideo" :inputs {:width 704 :height 480 :length 97 :batch_size 1}}
    "5" {:class_type "LTXVConditioning" :inputs {:positive ["2" 0] :negative ["3" 0] :frame_rate 24}}
    "6" {:class_type "KSampler" :inputs {:model ["1" 0] :positive ["5" 0] :negative ["5" 1]

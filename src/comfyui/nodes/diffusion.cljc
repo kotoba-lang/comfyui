@@ -25,6 +25,11 @@
      [{:name "MODEL" :type "MODEL"} {:name "CLIP_VISION" :type "CLIP_VISION"}
       {:name "VAE" :type "VAE"}]))
 
+(def clip-loader
+  (t "CLIPLoader" "loaders"
+     {:clip_name {:type "STRING"} :type {:type "STRING"}}
+     [{:name "CLIP" :type "CLIP"}]))
+
 (def clip-text-encode
   (t "CLIPTextEncode" "conditioning"
      {:clip {:type "CLIP"} :text {:type "STRING"}}
@@ -106,7 +111,7 @@
 (def pack
   "The diffusion node pack — register alongside comfyui.std to validate
   image/video/audio workflows."
-  [checkpoint-loader image-only-checkpoint-loader clip-text-encode
+  [checkpoint-loader image-only-checkpoint-loader clip-loader clip-text-encode
    empty-latent-image empty-latent-audio empty-ltxv-latent-video
    ltxv-conditioning ksampler svd-conditioning
    vae-decode vae-decode-audio load-image save-image save-animated-webp
