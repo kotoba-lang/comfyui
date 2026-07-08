@@ -20,4 +20,8 @@
          :exec-fn cognitect.test-runner.api/test}
   ;; local checkout for workspace development (orgs/kotoba-lang/*)
   :dev {:override-deps {io.github.kotoba-lang/langchain
-                        {:local/root "../langchain"}}}}}
+                        {:local/root "../langchain"}}}
+  ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
+  :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
+         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
+                     "--fail-level" "error"]}}}
