@@ -162,21 +162,67 @@
     (throw (ex-info "alpha must be in (0,1)" {:alpha alpha})))
   (Math/sqrt (/ (- 1.0 (double alpha)) (double alpha))))
 
+(defn karras-sigmas
+  "Construct k-diffusion's Karras noise schedule, including terminal zero."
+  ([steps sigma-min sigma-max] (karras-sigmas steps sigma-min sigma-max 7.0))
+  ([steps sigma-min sigma-max rho]
+   (when-not (and (pos-int? steps) (< 0.0 sigma-min sigma-max) (pos? rho))
+     (throw (ex-info "invalid Karras schedule"
+                     {:steps steps :sigma-min sigma-min
+                      :sigma-max sigma-max :rho rho})))
+   (let [min-root (Math/pow sigma-min (/ 1.0 rho))
+         max-root (Math/pow sigma-max (/ 1.0 rho))]
+     (conj
+      (mapv (fn [index]
+              (let [ramp (if (= steps 1) 0.0 (/ index (double (dec steps))))]
+                (Math/pow (+ max-root (* ramp (- min-root max-root))) rho)))
+            (range steps))
+      0.0))))
+
+(defn sigma->timestep
+  "Map a continuous sigma to a fractional discrete model timestep by linear
+  interpolation in log-sigma space, matching k-diffusion DiscreteSchedule."
+  [alphas sigma]
+  (when-not (and (seq alphas) (pos? sigma))
+    (throw (ex-info "sigma->timestep requires alphas and positive sigma"
+                    {:sigma sigma})))
+  (let [logs (mapv #(Math/log (alpha->sigma (double %))) alphas)
+        target (Math/log sigma)
+        last-index (dec (count logs))]
+    (cond
+      (<= target (first logs)) 0.0
+      (>= target (last logs)) (double last-index)
+      :else
+      (let [low (first (filter #(<= (nth logs %) target (nth logs (inc %)))
+                               (range last-index)))
+            low-log (nth logs low) high-log (nth logs (inc low))
+            weight (/ (- target low-log) (- high-log low-log))]
+        (+ low weight)))))
+
+(defn- resolve-sigmas [alphas timesteps sigmas]
+  (if sigmas
+    (do
+      (when-not (and (= (inc (count timesteps)) (count sigmas))
+                     (zero? (last sigmas))
+                     (every? pos? (butlast sigmas)))
+        (throw (ex-info "explicit sigma schedule must have one positive value per timestep plus zero"
+                        {:timesteps (count timesteps) :sigmas sigmas})))
+      (mapv double sigmas))
+    (conj (mapv #(alpha->sigma (double (nth alphas %))) timesteps) 0.0)))
+
 (defn euler-sample
   "Classifier-free-guided Euler discrete sampling for epsilon-prediction
   models. Model input is scaled by `1/sqrt(sigma^2+1)`; each step integrates
   the ODE derivative from the current training sigma to the next (final 0)."
-  [{:keys [sample alphas timesteps denoise-fn positive negative cfg on-step]
+  [{:keys [sample alphas timesteps sigmas denoise-fn positive negative cfg on-step]
     :or {cfg 1.0}}]
   (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn))
     (throw (ex-info "Euler sampler requires sample, alphas, timesteps, and denoise-fn" {})))
-  (loop [current sample remaining (seq timesteps) history []]
+  (loop [current sample remaining (seq timesteps)
+         sigma-remaining (seq (resolve-sigmas alphas timesteps sigmas)) history []]
     (if-let [timestep (first remaining)]
-      (let [next-timestep (second remaining)
-            sigma (alpha->sigma (double (nth alphas timestep)))
-            sigma-next (if (some? next-timestep)
-                         (alpha->sigma (double (nth alphas next-timestep)))
-                         0.0)
+      (let [sigma (first sigma-remaining)
+            sigma-next (second sigma-remaining)
             model-input (scale current (/ 1.0 (Math/sqrt (+ 1.0 (* sigma sigma)))))
             unconditional (denoise-fn model-input timestep negative)
             conditional (denoise-fn model-input timestep positive)
@@ -187,24 +233,24 @@
             event {:timestep timestep :sigma sigma :sigma-next sigma-next
                    :predicted-original-sample predicted-x0}]
         (when on-step (on-step event))
-        (recur next-sample (next remaining) (conj history event)))
+        (recur next-sample (next remaining) (next sigma-remaining)
+               (conj history event)))
       {:sample current :history history})))
 
 (defn euler-ancestral-sample
   "Euler ancestral sampling. Each transition decomposes target sigma into a
   deterministic `sigma-down` step plus fresh noise at `sigma-up`; `eta=1`
   matches the standard ancestral schedule."
-  [{:keys [sample alphas timesteps denoise-fn positive negative cfg eta noise-fn on-step]
+  [{:keys [sample alphas timesteps sigmas denoise-fn positive negative cfg eta noise-fn on-step]
     :or {cfg 1.0 eta 1.0}}]
   (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn)
                  (<= 0.0 eta))
     (throw (ex-info "Euler ancestral sampler received invalid arguments" {:eta eta})))
-  (loop [current sample remaining (seq timesteps) history []]
+  (loop [current sample remaining (seq timesteps)
+         sigma-remaining (seq (resolve-sigmas alphas timesteps sigmas)) history []]
     (if-let [timestep (first remaining)]
-      (let [next-timestep (second remaining)
-            sigma (alpha->sigma (double (nth alphas timestep)))
-            sigma-next (if (some? next-timestep)
-                         (alpha->sigma (double (nth alphas next-timestep))) 0.0)
+      (let [sigma (first sigma-remaining)
+            sigma-next (second sigma-remaining)
             model-input (scale current (/ 1.0 (Math/sqrt (+ 1.0 (* sigma sigma)))))
             epsilon (classifier-free-guidance
                      (denoise-fn model-input timestep negative)
@@ -230,7 +276,8 @@
             event {:timestep timestep :sigma sigma :sigma-next sigma-next
                    :sigma-up sigma-up :sigma-down sigma-down}]
         (when on-step (on-step event))
-        (recur next-sample (next remaining) (conj history event)))
+        (recur next-sample (next remaining) (next sigma-remaining)
+               (conj history event)))
       {:sample current :history history})))
 
 (defn dpmpp-2m-sample
@@ -240,18 +287,17 @@
   estimate `x0 = x - sigma*epsilon`. Non-final steps use the exponential
   first-order update, upgraded from the second step onward by the previous
   denoised estimate. The terminal sigma-zero step returns x0 exactly."
-  [{:keys [sample alphas timesteps denoise-fn positive negative cfg on-step]
+  [{:keys [sample alphas timesteps sigmas denoise-fn positive negative cfg on-step]
     :or {cfg 1.0}}]
   (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn))
     (throw (ex-info "DPM++ 2M sampler requires sample, alphas, timesteps, and denoise-fn"
                     {})))
-  (loop [current sample remaining (seq timesteps) old-denoised nil
-         previous-time nil history []]
+  (loop [current sample remaining (seq timesteps)
+         sigma-remaining (seq (resolve-sigmas alphas timesteps sigmas))
+         old-denoised nil previous-time nil history []]
     (if-let [timestep (first remaining)]
-      (let [next-timestep (second remaining)
-            sigma (alpha->sigma (double (nth alphas timestep)))
-            sigma-next (if (some? next-timestep)
-                         (alpha->sigma (double (nth alphas next-timestep))) 0.0)
+      (let [sigma (first sigma-remaining)
+            sigma-next (second sigma-remaining)
             model-input (scale current (/ 1.0 (Math/sqrt (+ 1.0 (* sigma sigma)))))
             epsilon (classifier-free-guidance
                      (denoise-fn model-input timestep negative)
@@ -279,6 +325,6 @@
                    :order (if (and old-denoised (pos? sigma-next)) 2 1)
                    :predicted-original-sample denoised :sample next-sample}]
         (when on-step (on-step event))
-        (recur next-sample (next remaining) denoised time
+        (recur next-sample (next remaining) (next sigma-remaining) denoised time
                (conj history event)))
       {:sample current :history history})))

@@ -111,24 +111,26 @@
         positive (arr/from-vec backend [0.3] [1 1 1 1])
         model {:comfyui/alphas-cumprod [0.9 0.7 0.5]
                :comfyui/denoise (fn [_sample _timestep conditioning] conditioning)}
-        run (fn [sampler-name seed]
+        run (fn [sampler-name scheduler-name seed]
               (let [workflow {"sample" {:class_type "KSampler"
                                          :inputs {:model model :positive positive
                                                   :negative negative
                                                   :latent_image sample :seed seed
                                                   :steps 2 :cfg 2.0
                                                   :sampler_name sampler-name
-                                                  :scheduler "normal"
+                                                  :scheduler scheduler-name
                                                   :denoise 1.0}}}]
                 (get-in (exec/execute {:registry registry} workflow)
                         [:results "sample" 0])))
-        ddim (run "ddim" 7)
-        ddim-again (run "ddim" 7)
-        ddim-other-seed (run "ddim" 8)
-        euler (run "euler" 7)
-        ancestral (run "euler_ancestral" 7)
-        dpmpp (run "dpmpp_2m" 7)
-        dpmpp-again (run "dpmpp_2m" 7)]
+        ddim (run "ddim" "normal" 7)
+        ddim-again (run "ddim" "normal" 7)
+        ddim-other-seed (run "ddim" "normal" 8)
+        euler (run "euler" "normal" 7)
+        ancestral (run "euler_ancestral" "normal" 7)
+        dpmpp (run "dpmpp_2m" "normal" 7)
+        dpmpp-again (run "dpmpp_2m" "normal" 7)
+        dpmpp-karras (run "dpmpp_2m" "karras" 7)
+        dpmpp-karras-again (run "dpmpp_2m" "karras" 7)]
     (is (= [1 1 1 1] (:shape ddim) (:shape euler) (:shape ancestral)
            (:shape dpmpp)))
     (is (not= (arr/->vec sample) (arr/->vec ddim)))
@@ -136,6 +138,8 @@
     (is (not= (arr/->vec sample) (arr/->vec ancestral)))
     (is (not= (arr/->vec sample) (arr/->vec dpmpp)))
     (is (= (arr/->vec dpmpp) (arr/->vec dpmpp-again)))
+    (is (= (arr/->vec dpmpp-karras) (arr/->vec dpmpp-karras-again)))
+    (is (not= (arr/->vec dpmpp) (arr/->vec dpmpp-karras)))
     (is (= (arr/->vec ddim) (arr/->vec ddim-again)))
     (is (not= (arr/->vec ddim) (arr/->vec ddim-other-seed)))))
 
