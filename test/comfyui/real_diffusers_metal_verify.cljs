@@ -62,6 +62,7 @@
                  caches [(-> denoise meta :comfyui/tensor-cache)
                          (-> encode meta :comfyui/tensor-cache)
                          (-> decode meta :comfyui/tensor-cache)]
+                 direct-upload? (boolean (resolve 'num.deno-gpu/upload-byte-view))
                  owned (concat [fixed-noise decoded image
                                 (:tensor positive-result) (:pooled positive-result)
                                 (:tensor negative-result) (:pooled negative-result)]
@@ -80,6 +81,8 @@
                       image-values (aget results 3)
                       epsilon-sums (mapv #(reduce + %) epsilon-values)
                       stats (dg/backend-stats backend)
+                      reader-stats (mapv safe/reader-stats
+                                         [unet-file text-file vae-file])
                       reference-clip [-0.8407002091407776 -0.3963874876499176
                                       -0.6832109093666077 0.021882688626646996
                                       -0.6473066210746765 0.13609130680561066
@@ -98,17 +101,21 @@
                            (< (Math/abs (- (reduce + image-values)
                                            391.7310791015625)) 1.0e-2)
                            (= (:live-buffers baseline) (:live-buffers stats))
-                           (= (:live-bytes baseline) (:live-bytes stats)))
+                           (= (:live-bytes baseline) (:live-bytes stats))
+                           (or (not direct-upload?)
+                               (every? pos? (map :direct-uploads reader-stats))))
                     (throw (ex-info "real Diffusers Metal verification failed"
                                     {:clip-first8 (vec (take 8 clip-values))
                                      :epsilon-sums epsilon-sums
                                      :latent-sum (reduce + latent-values)
                                      :image-sum (reduce + image-values)
                                      :image-first8 (vec (take 8 image-values))
-                                     :baseline baseline :stats stats})))
+                                     :baseline baseline :stats stats
+                                     :reader-stats reader-stats})))
                   (println "OK real Diffusers CLIP→2-step UNet→VAE matches PyTorch on"
                            (dg/adapter-description request) "peak-bytes"
-                           (:peak-live-bytes stats))))))))
+                           (:peak-live-bytes stats) "direct-checkpoint-bytes"
+                           (reduce + (map :direct-bytes reader-stats)))))))))
         (.catch (fn [error]
                   (println "ERROR:" (or (.-stack error) (str error)))
                   (when-let [data (ex-data error)]

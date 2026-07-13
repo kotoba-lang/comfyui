@@ -27,9 +27,13 @@
           (when-not (and (dtype-width dtype-name) (= expected (- end start))
                          (<= 0 start end payload))
             (throw (ex-info "invalid safetensors tensor" {:name name :entry entry})))))
-      {:path path :bytes bytes :data-start data-start :tensors tensors})))
+      {:path path :bytes bytes :data-start data-start :tensors tensors
+       :stats (atom {:direct-uploads 0 :direct-bytes 0
+                     :decoded-uploads 0 :decoded-elements 0})})))
 
 (defn tensor-names [checkpoint] (vec (sort (keys (:tensors checkpoint)))))
+
+(defn reader-stats [checkpoint] @(:stats checkpoint))
 
 (defn- bf16->f32 [bits]
   (let [buffer (js/ArrayBuffer. 4)
@@ -66,7 +70,23 @@
     (when-not entry
       (throw (ex-info "tensor absent from safetensors" {:tensor tensor-name
                                                          :path (:path checkpoint)})))
-    (arr/from-vec backend (decode-values checkpoint entry) (get entry "shape"))))
+    (let [shape (get entry "shape")
+          dtype-name (get entry "dtype")]
+      (if-let [upload (and (= "F32" dtype-name)
+                           (resolve 'num.deno-gpu/upload-byte-view))]
+        (let [[start end] (get entry "data_offsets")
+              offset (+ (:data-start checkpoint) start)
+              bytes (:bytes checkpoint)
+              window (.subarray bytes offset (+ (:data-start checkpoint) end))]
+          (swap! (:stats checkpoint)
+                 #(-> % (update :direct-uploads inc)
+                      (update :direct-bytes + (- end start))))
+          (upload backend window shape :f32))
+        (do
+          (swap! (:stats checkpoint)
+                 #(-> % (update :decoded-uploads inc)
+                      (update :decoded-elements + (nelems shape))))
+          (arr/from-vec backend (decode-values checkpoint entry) shape))))))
 
 (defn component [checkpoint]
   {:comfyui/read-tensor (fn [backend name]

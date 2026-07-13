@@ -373,7 +373,10 @@ deno run --allow-all target/real-diffusers-metal-verify.cjs \
 On Apple M4, `Narsil/tiny-stable-diffusion-torch` completes this verifier with
 the same pinned PyTorch tolerances above, peaks at 7,744,788 tracked GPU-buffer
 bytes, and returns to exactly zero live buffers/bytes after outputs and all
-three lazy weight caches are released. NCHW channel embedding broadcast is
+three lazy weight caches are released. With a num backend exposing raw byte-view
+upload, 7,590,224 checkpoint bytes are transferred from their validated F32
+safetensors windows without first allocating per-element JavaScript numbers;
+older backends retain the decoded-vector fallback. NCHW channel embedding broadcast is
 lowered through device-native transpose plus last-axis bias dispatch, so this
 real UNet path performs no synchronous GPU readback.
 
