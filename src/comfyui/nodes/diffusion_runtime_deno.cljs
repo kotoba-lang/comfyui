@@ -30,10 +30,26 @@
   (let [value (str/replace (or value "ComfyUI") #"[^A-Za-z0-9._-]" "_")]
     (if (seq value) value "ComfyUI")))
 
+(defn- load-png [backend input-directory filename]
+  (when-not (and (seq input-directory) (string? filename) (not (str/blank? filename)))
+    (throw (ex-info "Deno LoadImage requires input-directory and filename" {})))
+  (let [directory (js/Deno.realPathSync input-directory)
+        candidate (js/Deno.realPathSync (str input-directory "/" filename))
+        _ (when-not (and (str/starts-with? candidate (str directory "/"))
+                         (.-isFile (js/Deno.statSync candidate)))
+            (throw (ex-info "LoadImage path escapes input directory"
+                            {:filename filename})))
+        bytes (js/Deno.readFileSync candidate)]
+    (-> (png/decode-rgb bytes)
+        (.then (fn [{:keys [width height values mask]}]
+                 [(arr/from-vec backend values [1 height width 3])
+                  (arr/from-vec backend mask [1 height width])])))))
+
 (defn pack
   "Build real Deno nodes. `pipeline` contains paths plus inferred specs/alphas;
   `tokenize` and `noise-fn` are explicit host capabilities."
-  [{:keys [backend pipeline tokenize noise-fn output-directory timesteps-fn]
+  [{:keys [backend pipeline tokenize noise-fn input-directory output-directory
+           timesteps-fn]
     :or {timesteps-fn (fn [alphas steps]
                         (scheduler/select-timesteps (count alphas) steps))}}]
   [{:type "DiffusersPipelineLoader"
@@ -70,12 +86,20 @@
              (assoc clip-component :comfyui/clip-spec clip-spec
                     :comfyui/encode
                     (clip/compile-encoder clip-component backend clip-spec))
-             (assoc vae-component :comfyui/model-spec vae-spec
-                    :comfyui/decode
-                    (model/compile-decoder vae-component backend vae-spec))])
+             (cond-> (assoc vae-component :comfyui/model-spec vae-spec
+                            :comfyui/decode
+                            (model/compile-decoder vae-component backend vae-spec))
+               (:encoder-layers vae-spec)
+               (assoc :comfyui/encode
+                      (model/compile-encoder vae-component backend vae-spec)))])
           (catch :default error
             (doseq [checkpoint @opened] (safe/close-file! checkpoint))
             (throw error)))))}
+   {:type "LoadImage"
+    :category "image"
+    :inputs {:image {:type "STRING"}}
+    :outputs [{:name "IMAGE" :type "IMAGE"} {:name "MASK" :type "MASK"}]
+    :fn (fn [{:keys [image]}] (load-png backend input-directory image))}
    {:type "CLIPTextEncode"
     :category "conditioning"
     :inputs {:clip {:type "CLIP"} :text {:type "STRING"}}
@@ -119,7 +143,8 @@
                      (fn? noise-fn))
         (throw (ex-info "unsupported Deno sampler/scheduler/denoise combination"
                         {:sampler sampler_name :scheduler scheduler :denoise denoise})))
-      (let [empty (:samples latent_image)
+      (let [empty (if (and (map? latent_image) (contains? latent_image :samples))
+                    (:samples latent_image) latent_image)
             alphas (:comfyui/alphas-cumprod model)
             denoise-fn (:comfyui/denoise model)
             denoise (double denoise)
@@ -173,6 +198,25 @@
                 image (t/nchw-to-rgb-image decoded)]
             (arr/release! decoded)
             [image]))}
+   {:type "VAEEncode"
+    :category "latent"
+    :inputs {:pixels {:type "IMAGE"} :vae {:type "VAE"}}
+    :outputs [{:name "LATENT" :type "LATENT"}]
+    :fn (fn [{:keys [pixels vae]}]
+          (let [encode (:comfyui/encode vae)
+                [batch _height _width channels :as shape] (:shape pixels)]
+            (when-not (and (fn? encode) (= 4 (count shape)) (= 3 channels))
+              (throw (ex-info "Deno VAEEncode requires executable VAE and NHWC RGB"
+                              {:shape shape})))
+            (let [nchw (t/rgb-image-to-nchw pixels)
+                  latent (encode nchw)]
+              (arr/release! nchw)
+              (when-not (and (= 4 (count (:shape latent)))
+                             (= batch (first (:shape latent))))
+                (arr/release! latent)
+                (throw (ex-info "Deno VAE encoder returned invalid latent"
+                                {:pixels shape :latent (:shape latent)})))
+              [latent])))}
    {:type "SaveImage"
     :category "image" :output-node? true
     :inputs {:images {:type "IMAGE"}

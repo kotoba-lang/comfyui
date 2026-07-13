@@ -98,6 +98,12 @@
    :main-opts ["-m" "cljs.main"
                "-co" "{:optimizations :simple :target :nodejs :main comfyui.vae-encoder-metal-verify :output-to \"target/vae-encoder-metal-verify.cjs\"}"
                "-c" "comfyui.vae-encoder-metal-verify"]}
+  :deno-img2img-nodes-verify
+  {:extra-paths ["test"]
+   :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+   :main-opts ["-m" "cljs.main"
+               "-co" "{:optimizations :simple :target :nodejs :main comfyui.deno-img2img-nodes-verify :output-to \"target/deno-img2img-nodes-verify.cjs\"}"
+               "-c" "comfyui.deno-img2img-nodes-verify"]}
   ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
   :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"

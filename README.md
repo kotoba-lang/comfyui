@@ -425,6 +425,26 @@ and run through `comfyui.exec/execute-async`. Tokenization and seeded noise stay
 explicit host capabilities; unsupported sampler combinations fail rather than
 silently changing algorithms. The live graph gate runs this API-format graph:
 
+The Deno pack now includes the img2img boundary as well. `LoadImage` reads an
+input-directory-confined RGB/RGBA PNG, validates chunk CRCs, implements all five
+scanline filters, emits normalized NHWC RGB plus ComfyUI's inverse-alpha mask,
+and rejects canonical-path escapes. `DiffusersPipelineLoader` compiles the
+inferred VAE encoder when present; `VAEEncode` performs device-native RGB→NCHW
+conversion and returns a latent accepted directly by partial-denoise `KSampler`.
+A live Apple Metal verifier compares decoded pixels and latent values with the
+CPU oracle, checks corrupt-CRC/path-escape rejection, and restores the exact GPU
+buffer baseline:
+
+```sh
+clojure -M:deno-img2img-nodes-verify
+deno run --allow-all target/deno-img2img-nodes-verify.cjs
+# PNG CRC and path confinement: passed
+# Deno PNG LoadImage → VAEEncode on Apple M4 passed
+# GPU baseline restored: passed
+```
+
+The txt2img graph remains:
+
 ```text
 DiffusersPipelineLoader ─┬─ CLIPTextEncode(positive) ─┐
                          ├─ CLIPTextEncode(negative) ─┼─ KSampler
@@ -437,6 +457,11 @@ clojure -M:real-diffusers-graph-metal-verify
 deno run --allow-all target/real-diffusers-graph-metal-verify.cjs \
   pipeline.edn unet/model.safetensors text_encoder/model.safetensors \
   vae/model.safetensors output-directory
+
+# Optional full-checkpoint img2img graph
+deno run --allow-all target/real-diffusers-graph-metal-verify.cjs \
+  pipeline.edn unet/model.safetensors text_encoder/model.safetensors \
+  vae/model.safetensors output-directory ddim normal img2img
 ```
 
 Both F32 and fully converted F16 public checkpoints execute all seven nodes,

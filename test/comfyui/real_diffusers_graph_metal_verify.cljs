@@ -23,7 +23,7 @@
 
 (defn -main
   [& [spec-path unet-path text-path vae-path output-directory
-      sampler-name scheduler-name]]
+      sampler-name scheduler-name mode]]
   (when-not output-directory
     (throw (ex-info "usage: SPEC UNET TEXT VAE OUTPUT_DIRECTORY" {})))
   (let [{:keys [unet clip vae alphas positive negative]}
@@ -31,8 +31,19 @@
         f16? (every? f16-file? [unet-path text-path vae-path])
         direct? (boolean (resolve 'num.deno-gpu/upload-byte-view))
         sampler-name (or sampler-name "ddim")
-        scheduler-name (or scheduler-name "normal")]
-    (-> (dg/request-device)
+        scheduler-name (or scheduler-name "normal")
+        img2img? (= mode "img2img")
+        input-name "metal_graph_input.png"
+        input-path (str output-directory "/" input-name)
+        input-values (mapv #(/ (mod (* % 37) 256) 255.0) (range (* 16 16 3)))
+        setup (if img2img?
+                (-> (png/encode-rgb input-values 16 16)
+                    (.then (fn [bytes]
+                             (js/Deno.mkdirSync output-directory #js {:recursive true})
+                             (js/Deno.writeFileSync input-path bytes))))
+                (js/Promise.resolve nil))]
+    (-> setup
+        (.then (fn [_] (dg/request-device)))
         (.then
          (fn [request]
            (let [backend (dg/backend request)
@@ -48,6 +59,7 @@
                                                 (range (arr/nelems shape))) shape))
                  pack (runtime/pack
                        {:backend backend :tokenize tokenize :noise-fn noise-fn
+                        :input-directory output-directory
                         :output-directory output-directory
                         :timesteps-fn (fn [_ _] [501 1])
                         :pipeline {:unet unet-path :text-encoder text-path
@@ -62,18 +74,25 @@
                        :inputs {:clip ["1" 1] :text "a tiny red robot"}}
                   "3" {:class_type "CLIPTextEncode"
                        :inputs {:clip ["1" 1] :text "blurry"}}
-                  "4" {:class_type "EmptyLatentImage"
-                       :inputs {:width 64 :height 64 :batch_size 1}}
+                  "4" (if img2img?
+                        {:class_type "LoadImage" :inputs {:image input-name}}
+                        {:class_type "EmptyLatentImage"
+                         :inputs {:width 64 :height 64 :batch_size 1}})
+                  "8" (when img2img?
+                        {:class_type "VAEEncode"
+                         :inputs {:pixels ["4" 0] :vae ["1" 2]}})
                   "5" {:class_type "KSampler"
                        :inputs {:model ["1" 0] :positive ["2" 0]
-                                :negative ["3" 0] :latent_image ["4" 0]
+                                :negative ["3" 0]
+                                :latent_image [(if img2img? "8" "4") 0]
                                 :seed 0 :steps 2 :cfg 2.0
                                 :sampler_name sampler-name :scheduler scheduler-name
-                                :denoise 1.0}}
+                                :denoise (if img2img? 0.5 1.0)}}
                   "6" {:class_type "VAEDecode"
                        :inputs {:samples ["5" 0] :vae ["1" 2]}}
                   "7" {:class_type "SaveImage"
                        :inputs {:images ["6" 0] :filename_prefix "metal_graph"}}}
+                 workflow (into {} (remove (comp nil? val) workflow))
                  started (.now js/performance)]
              (-> (exec/execute-async
                   {:registry registry :on-event #(swap! events conj %)} workflow)
@@ -83,6 +102,9 @@
                           positive-result (get-in execution [:results "2" 0])
                           negative-result (get-in execution [:results "3" 0])
                           sample-result (get-in execution [:results "5" 0])
+                          loaded-image (when img2img? (get-in execution [:results "4" 0]))
+                          loaded-mask (when img2img? (get-in execution [:results "4" 1]))
+                          encoded-latent (when img2img? (get-in execution [:results "8" 0]))
                           latent (:samples sample-result)
                           image (get-in execution [:results "6" 0])
                           ui (get-in execution [:results "7" 0])
@@ -95,7 +117,7 @@
                       (arr/release-all!
                        [(:tensor positive-result) (:pooled positive-result)
                         (:tensor negative-result) (:pooled negative-result)
-                        latent image])
+                        loaded-image loaded-mask encoded-latent latent image])
                       (runtime/release-components! components)
                       (.then
                        reads
@@ -105,9 +127,11 @@
                                elapsed-ms (- (.now js/performance) started)
                                stats (dg/backend-stats backend)]
                            (when-not
-                               (and (= ["1" "4" "2" "3" "5" "6" "7"]
+                               (and (= (if img2img?
+                                         ["1" "4" "2" "3" "8" "5" "6" "7"]
+                                         ["1" "4" "2" "3" "5" "6" "7"])
                                        (:executed execution))
-                                    (= 7 (count @events))
+                                    (= (if img2img? 8 7) (count @events))
                                     (= [16 16] (png/dimensions png-bytes))
                                     (> (.-byteLength png-bytes) 500)
                                     (or (not direct?)
@@ -116,7 +140,7 @@
                                     (= 2 (count (:history sample-result)))
                                     (every? #(js/Number.isFinite %) latent-values)
                                     (every? #(js/Number.isFinite %) image-values)
-                                    (or (not= "ddim" sampler-name)
+                                    (or img2img? (not= "ddim" sampler-name)
                                         (and (close? (if f16? 15.374797308671601
                                                          15.379568099975586)
                                                      (reduce + latent-values) 1.0e-3)
@@ -138,6 +162,7 @@
                                     "peak-bytes" (:peak-live-bytes stats)
                                     "checkpoint-dtype" (if f16? "F16" "F32")
                                     "sampler" sampler-name "scheduler" scheduler-name
+                                    "mode" (if img2img? "img2img" "txt2img")
                                     "elapsed-ms" (.toFixed elapsed-ms 3)
                                     "output" path)))))))))))
         (.catch (fn [error]
