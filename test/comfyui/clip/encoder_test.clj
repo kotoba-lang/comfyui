@@ -55,3 +55,18 @@
     (is (= 20 @reads))
     (encode tokens)
     (is (= 20 @reads) "all transformer weights remain cached")))
+
+(deftest dual-encoder-concatenates-conditioning-and-uses-second-pool
+  (let [left {:tensor (arr/from-vec backend (range 24) [1 3 8])
+              :pooled (arr/from-vec backend (range 8) [1 8])}
+        right {:tensor (arr/from-vec backend (range 12) [1 3 4])
+               :pooled (arr/from-vec backend [9 8 7 6] [1 4])}]
+    (with-redefs [clip/compile-encoder
+                  (fn [_ _ spec] (fn [_] (if (= :left (:id spec)) left right)))]
+      (let [encode (clip/compile-dual-encoder {} backend
+                                               {:mode :dual
+                                                :encoders [{:id :left} {:id :right}]})
+            result (encode {:input-ids [1 2 3]})]
+        (is (= [1 3 12] (:shape (:tensor result))))
+        (is (= [1 4] (:shape (:pooled result))))
+        (is (= [9.0 8.0 7.0 6.0] (arr/->vec (:pooled result))))))))

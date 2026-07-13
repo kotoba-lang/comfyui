@@ -118,13 +118,17 @@
                          (diffusion-model/compile-decoder
                           vae-component backend decoder-spec)))
                 clip-component (component checkpoint :clip
-                                          ["cond_stage_model." "text_encoder." "clip."])
+                                          ["cond_stage_model." "text_encoder."
+                                           "text_encoder_2." "conditioner.embedders."
+                                           "clip."])
                 executable-clip
                 (cond-> clip-component
                   resolved-clip-spec
                   (assoc :comfyui/clip-spec resolved-clip-spec
                          :comfyui/encode
-                         (clip-encoder/compile-encoder
+                         ((if (= :dual (:mode resolved-clip-spec))
+                            clip-encoder/compile-dual-encoder
+                            clip-encoder/compile-encoder)
                           clip-component backend resolved-clip-spec)))]
             [executable-model
              executable-clip

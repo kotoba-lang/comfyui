@@ -185,6 +185,11 @@ automatically from the standard `CLIPTextModel` tensor catalog: contiguous
 encoder layer count, hidden width/head count, both norms, Q/K/V/out projections,
 MLP weights, and final norm. Auto-mapping is all-or-nothing; a missing tensor
 returns no executable encoder instead of silently constructing a partial model.
+For SDXL checkpoints containing two complete HF `CLIPTextModel` catalogs, both
+encoders are inferred and executed automatically. Their per-token features are
+concatenated on the hidden dimension (for example 768 + 1280 = 2048), while the
+second encoder supplies pooled conditioning; individual encoder results remain
+available as `:clip-l` and `:clip-g` for audit/debugging.
 
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
@@ -194,8 +199,8 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-This is not yet a complete SD/SDXL render: SDXL dual-CLIP mapping/concatenation,
-complete
+This is not yet a complete SD/SDXL render: native CompVis/OpenCLIP fused-QKV
+SDXL checkpoint mapping (as distinct from dual HF catalogs), complete
 production block/config mapping after family detection, additional
 ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
 precision, and an installed real

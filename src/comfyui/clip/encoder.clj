@@ -137,3 +137,27 @@
                                      [1 hidden-size])]
           (assoc tokenized :tensor output :pooled pooled)))
       {:comfyui/clip-spec spec :comfyui/tensor-cache cache})))
+
+(defn compile-dual-encoder
+  "Compile two CLIP encoders, concatenate token features, and retain the
+  second encoder's pooled embedding for SDXL added conditioning."
+  [component backend {:keys [encoders] :as spec}]
+  (when-not (= 2 (count encoders))
+    (fail "dual encoder requires exactly two encoder specs" {:spec spec}))
+  (let [[encode-l encode-g] (mapv #(compile-encoder component backend %) encoders)]
+    (with-meta
+      (fn [tokenized]
+        (let [left (encode-l tokenized)
+              right (encode-g tokenized)
+              left-tensor (:tensor left)
+              right-tensor (:tensor right)]
+          (when-not (= (subvec (:shape left-tensor) 0 2)
+                       (subvec (:shape right-tensor) 0 2))
+            (fail "dual encoder batch/token dimensions differ"
+                  {:left (:shape left-tensor) :right (:shape right-tensor)}))
+          (assoc tokenized
+                 :tensor (t/cat [left-tensor right-tensor] 2)
+                 :pooled (:pooled right)
+                 :clip-l left
+                 :clip-g right)))
+      {:comfyui/clip-spec spec})))

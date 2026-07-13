@@ -69,3 +69,29 @@
            (:query-weight (first (:layers spec)))))
     (is (nil? (architecture/infer-clip-spec
                (update complete :tensors dissoc (str layer-base "mlp.fc2.bias")) info)))))
+
+(defn- hf-clip-tensors [root hidden]
+  (let [layer (str root "encoder.layers.0.")
+        suffixes ["layer_norm1.weight" "layer_norm1.bias"
+                  "self_attn.q_proj.weight" "self_attn.q_proj.bias"
+                  "self_attn.k_proj.weight" "self_attn.k_proj.bias"
+                  "self_attn.v_proj.weight" "self_attn.v_proj.bias"
+                  "self_attn.out_proj.weight" "self_attn.out_proj.bias"
+                  "layer_norm2.weight" "layer_norm2.bias"
+                  "mlp.fc1.weight" "mlp.fc1.bias"
+                  "mlp.fc2.weight" "mlp.fc2.bias"]]
+    (merge {(str root "embeddings.token_embedding.weight") {"shape" [100 hidden]}
+            (str root "embeddings.position_embedding.weight") {"shape" [77 hidden]}
+            (str root "final_layer_norm.weight") {"shape" [hidden]}
+            (str root "final_layer_norm.bias") {"shape" [hidden]}}
+           (into {} (map (fn [suffix] [(str layer suffix) {"shape" [hidden]}]) suffixes)))))
+
+(deftest infers-sdxl-dual-hf-clip-spec
+  (let [checkpoint* (update (checkpoint 2048 4 true) :tensors merge
+                            (hf-clip-tensors "conditioner.embedders.0.transformer.text_model."
+                                             768)
+                            (hf-clip-tensors "text_encoder_2.text_model." 1280))
+        spec (architecture/infer-clip-spec checkpoint* (architecture/infer checkpoint*))]
+    (is (= :dual (:mode spec)))
+    (is (= [12 20] (mapv :heads (:encoders spec))))
+    (is (= 2 (count (:encoders spec))))))

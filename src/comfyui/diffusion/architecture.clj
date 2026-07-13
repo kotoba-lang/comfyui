@@ -32,7 +32,9 @@
         label-conditioning? (boolean
                              (some #(str/includes? % "diffusion_model.label_emb.") names))
         clip? (boolean (some #(or (str/starts-with? % "cond_stage_model.")
-                                  (str/starts-with? % "text_encoder.")) names))
+                                  (str/starts-with? % "text_encoder.")
+                                  (str/starts-with? % "text_encoder_2.")
+                                  (str/starts-with? % "conditioner.embedders.")) names))
         vae? (boolean (some #(or (str/starts-with? % "first_stage_model.")
                                  (str/starts-with? % "vae.")) names))
         base-family
@@ -66,16 +68,8 @@
     (scheduler/alphas-cumprod
      (scheduler/scaled-linear-betas 1000 0.00085 0.012))))
 
-(defn infer-clip-spec
-  "Infer a single standard CLIPTextModel graph for SD1/SD2 checkpoints.
-  Returns nil for SDXL dual encoders or if any required tensor is absent."
-  [checkpoint {:keys [family]}]
-  (when (contains? #{:stable-diffusion-v1 :stable-diffusion-v2} family)
-    (let [names (set (safe/tensor-names checkpoint))
-          token-suffix "embeddings.token_embedding.weight"
-          token-name (first (filter #(str/ends-with? % token-suffix) names))
-          root (when token-name (subs token-name 0 (- (count token-name)
-                                                       (count token-suffix))))
+(defn- infer-hf-clip-spec [checkpoint names root]
+    (let [token-name (str root "embeddings.token_embedding.weight")
           position-name (str root "embeddings.position_embedding.weight")
           layer-pattern (when root
                           (re-pattern
@@ -119,4 +113,25 @@
         {:token-embedding token-name :position-embedding position-name
          :layers layers :heads heads
          :final-norm-weight final-weight :final-norm-bias final-bias
-         :eps 1.0e-5}))))
+         :eps 1.0e-5})))
+
+(defn infer-clip-spec
+  "Infer executable HF CLIP graphs. SD1/SD2 return one encoder; SDXL returns
+  a dual encoder spec when two complete text encoders are present."
+  [checkpoint {:keys [family]}]
+  (let [names (set (safe/tensor-names checkpoint))
+        token-suffix "embeddings.token_embedding.weight"
+        roots (->> names
+                   (filter #(str/ends-with? % token-suffix))
+                   (map #(subs % 0 (- (count %) (count token-suffix))))
+                   sort vec)
+        specs (vec (keep #(infer-hf-clip-spec checkpoint names %) roots))]
+    (cond
+      (contains? #{:stable-diffusion-v1 :stable-diffusion-v2} family)
+      (when (= 1 (count specs)) (first specs))
+
+      (contains? #{:stable-diffusion-xl-base :stable-diffusion-xl-refiner} family)
+      (when (>= (count specs) 2)
+        {:mode :dual :encoders (vec (take 2 specs))})
+
+      :else nil)))
