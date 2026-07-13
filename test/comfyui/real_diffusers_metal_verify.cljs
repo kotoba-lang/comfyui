@@ -103,7 +103,12 @@
                            (= (:live-buffers baseline) (:live-buffers stats))
                            (= (:live-bytes baseline) (:live-bytes stats))
                            (or (not direct-upload?)
-                               (every? pos? (map :direct-uploads reader-stats))))
+                               (every? pos? (map :direct-uploads reader-stats)))
+                           (every? true?
+                                   (map #(< (:peak-window-bytes %)
+                                            (:file-size %2))
+                                        reader-stats
+                                        [unet-file text-file vae-file])))
                     (throw (ex-info "real Diffusers Metal verification failed"
                                     {:clip-first8 (vec (take 8 clip-values))
                                      :epsilon-sums epsilon-sums
@@ -115,11 +120,15 @@
                   (println "OK real Diffusers CLIP→2-step UNet→VAE matches PyTorch on"
                            (dg/adapter-description request) "peak-bytes"
                            (:peak-live-bytes stats) "direct-checkpoint-bytes"
-                           (reduce + (map :direct-bytes reader-stats)))))))))
+                           (reduce + (map :direct-bytes reader-stats))
+                           "largest-host-window"
+                           (apply max (map :peak-window-bytes reader-stats)))))))))
         (.catch (fn [error]
                   (println "ERROR:" (or (.-stack error) (str error)))
                   (when-let [data (ex-data error)]
                     (println "DATA:" (pr-str data)))
-                  (js/Deno.exit 1))))))
+                  (js/Deno.exit 1)))
+        (.finally #(doseq [checkpoint [unet-file text-file vae-file]]
+                     (safe/close-file! checkpoint))))))
 
 (set! *main-cli-fn* -main)

@@ -379,6 +379,12 @@ safetensors windows without first allocating per-element JavaScript numbers;
 older backends retain the decoded-vector fallback. NCHW channel embedding broadcast is
 lowered through device-native transpose plus last-axis bias dispatch, so this
 real UNet path performs no synchronous GPU readback.
+The Deno reader keeps an open file handle rather than retaining the whole
+checkpoint in a `Uint8Array`: it reads the bounded JSON header once and seeks to
+one validated tensor window per lazy cache miss. Across the 7,590,224 bytes used
+by the public tiny pipeline, the largest host window is 294,912 bytes. The
+verifiers close each file explicitly, reject reads after close, and still return
+all tracked GPU storage to baseline.
 F16 and BF16 safetensors windows use the same route when supported: encoded
 16-bit words are uploaded unchanged, expanded by Metal into the current f32
 execution graph, and the temporary packed buffer is immediately retired.

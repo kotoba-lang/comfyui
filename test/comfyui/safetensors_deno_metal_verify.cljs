@@ -41,7 +41,11 @@
              (.then (js/Promise.all #js [(arr/->vec half) (arr/->vec bfloat)])
                     (fn [values]
                       (arr/release-all! [half bfloat])
-                      (let [reader (safe/reader-stats checkpoint)
+                      (safe/close-file! checkpoint)
+                      (let [closed-rejected?
+                            (try (safe/read-tensor checkpoint backend "half") false
+                                 (catch :default _ true))
+                            reader (safe/reader-stats checkpoint)
                             stats (dg/backend-stats backend)]
                         (when-not (and (= [1.0 -2.0 3.0] (aget values 0))
                                        (= [1.0 -2.0 3.0] (aget values 1))
@@ -52,7 +56,8 @@
                                          (and (= 2 (:decoded-uploads reader))
                                               (= 6 (:decoded-elements reader))))
                                        (= (:live-buffers baseline) (:live-buffers stats))
-                                       (= (:live-bytes baseline) (:live-bytes stats)))
+                                       (= (:live-bytes baseline) (:live-bytes stats))
+                                       closed-rejected?)
                           (throw (ex-info "F16 safetensors Metal verification failed"
                                           {:values values :reader reader
                                            :baseline baseline :stats stats})))
