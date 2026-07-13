@@ -180,6 +180,7 @@
             step (ddim-step current epsilon alpha alpha-prev {:eta eta :noise noise})
             event {:timestep timestep :alpha alpha :alpha-prev alpha-prev
                    :sigma (:sigma step) :epsilon epsilon
+                   :predicted-original-sample (:predicted-original-sample step)
                    :sample (:previous-sample step)}
             audited (audit-event event retain-step-tensors?)
             protected (concat [sample current (:previous-sample step)]

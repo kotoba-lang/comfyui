@@ -11,7 +11,7 @@
         io.github.kotoba-lang/langchain
         {:git/sha "c74e358c486bdbbed415261abe352ae73831bb8e"}
         io.github.kotoba-lang/num
-        {:git/sha "d68d98a9744a220f9bbb476fb7c2cec6db440637"}}
+        {:git/sha "a03c9dbfcf056cff21dfef9fc67012f3fc97444f"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
@@ -38,7 +38,7 @@
   {:extra-paths ["test"]
    :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}
                 io.github.kotoba-lang/num
-                {:git/sha "d68d98a9744a220f9bbb476fb7c2cec6db440637"}}
+                {:git/sha "a03c9dbfcf056cff21dfef9fc67012f3fc97444f"}}
    :main-opts ["-m" "cljs.main"
                "-co" "{:optimizations :simple :target :nodejs :main comfyui.nodes.toy-diffusion-metal-verify :output-to \"target/toy-diffusion-metal-verify.cjs\"}"
                "-c" "comfyui.nodes.toy-diffusion-metal-verify"]}
@@ -54,6 +54,15 @@
   {:extra-paths ["test"]
    :jvm-opts ["-Xms128m" "-Xmx2g"]
    :main-opts ["-m" "comfyui.real-diffusers-pipeline-verify"]}
+  :export-diffusers-metal-spec
+  {:extra-paths ["test"]
+   :main-opts ["-m" "comfyui.export-diffusers-metal-spec"]}
+  :real-diffusers-metal-verify
+  {:extra-paths ["test"]
+   :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+   :main-opts ["-m" "cljs.main"
+               "-co" "{:optimizations :simple :target :nodejs :main comfyui.real-diffusers-metal-verify :output-to \"target/real-diffusers-metal-verify.cjs\"}"
+               "-c" "comfyui.real-diffusers-metal-verify"]}
   ;; comfyui.diffusion.model / comfyui.clip.encoder were JVM-only .clj files
   ;; despite touching no JVM I/O (tensors are injected via a component's
   ;; :comfyui/read-tensor fn); the only JVM-only surface was bare Math/foo

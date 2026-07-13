@@ -21,8 +21,9 @@ src/comfyui/
   std.cljc             standard node pack (primitives, math, text, Preview)
   viz.cljc             workflow → Mermaid
   nodes/langchain.cljc ChatModel / tool nodes bridging to langchain-clj
-  safetensors.clj     lazy, validated F16/BF16/F32 checkpoint reader
-  diffusion/model.clj checkpoint-backed UNet graph lowering/execution
+  safetensors.clj      lazy, validated JVM checkpoint reader
+  safetensors_deno.cljs direct validated Deno/Metal checkpoint reader
+  diffusion/model.cljc checkpoint-backed UNet/VAE graph lowering/execution
   diffusion/          real noise schedules and DDIM latent transitions
 ```
 
@@ -349,6 +350,32 @@ and 70 VAE tensors loaded, a real 852-byte PNG was emitted, CLIP max error was
 and image max/sum errors `1.19e-5` / `7.80e-5`.
 Full-denoise DDIM begins from the seeded noise tensor (`init_noise_sigma=1`),
 while Euler retains sigma-scaled initialization.
+
+The same public split checkpoint now runs directly through Deno WebGPU/Metal;
+it is no longer restricted to the JVM CPU loader. The JVM exporter inspects
+tensor metadata/configs and emits only the inferred graph, schedule, and token
+IDs. Deno independently validates each safetensors byte window, decodes
+floating-point and integer dtypes, lazily uploads the requested weights, and
+executes CLIP → two CFG UNet/DDIM steps → VAE without a Python runtime:
+
+```sh
+clojure -M:export-diffusers-metal-spec pipeline.edn \
+  unet/model.safetensors unet/config.json \
+  text_encoder/model.safetensors text_encoder/config.json \
+  vae/model.safetensors vae/config.json scheduler/scheduler_config.json \
+  tokenizer/vocab.json tokenizer/merges.txt
+clojure -M:real-diffusers-metal-verify
+deno run --allow-all target/real-diffusers-metal-verify.cjs \
+  pipeline.edn unet/model.safetensors text_encoder/model.safetensors \
+  vae/model.safetensors
+```
+
+On Apple M4, `Narsil/tiny-stable-diffusion-torch` completes this verifier with
+the same pinned PyTorch tolerances above, peaks at 7,744,788 tracked GPU-buffer
+bytes, and returns to exactly zero live buffers/bytes after outputs and all
+three lazy weight caches are released. NCHW channel embedding broadcast is
+lowered through device-native transpose plus last-axis bias dispatch, so this
+real UNet path performs no synchronous GPU readback.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against

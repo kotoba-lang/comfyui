@@ -28,8 +28,22 @@
     :else nil))
 
 (defn- linear [x weight bias]
-  (let [output (t/matmul x (t/transpose weight))]
-    (if bias (t/add output bias) output)))
+  (let [transposed (t/transpose weight)
+        multiplied (t/matmul x transposed)
+        output (if bias (t/add multiplied bias) multiplied)]
+    (arr/release! transposed)
+    (when bias (arr/release! multiplied))
+    output))
+
+(defn- add-channel-bias
+  "Device-native NCHW channel broadcast through the last-axis bias kernel."
+  [value projected]
+  (let [[_batch channels _height _width] (:shape value)
+        nhwc (t/transpose value [0 2 3 1])
+        biased (t/add nhwc (t/reshape projected [channels]))
+        output (t/transpose biased [0 3 1 2])]
+    (arr/release-all! [nhwc biased])
+    output))
 
 (defn- sinusoidal-vector
   ([backend values embedding-dim]
@@ -60,9 +74,13 @@
         input-dim (second (:shape first-weight))
         input (sinusoidal-vector (:backend value) [timestep] input-dim
                                  (boolean (:flip-sin-to-cos? layer))
-                                 (double (or (:frequency-shift layer) 1.0)))]
-    (linear (t/silu (linear input first-weight (tensor! (:first-bias layer))))
-            (tensor! (:second-weight layer)) (tensor! (:second-bias layer)))))
+                                 (double (or (:frequency-shift layer) 1.0)))
+        first-projected (linear input first-weight (tensor! (:first-bias layer)))
+        activated (t/silu first-projected)
+        output (linear activated (tensor! (:second-weight layer))
+                       (tensor! (:second-bias layer)))]
+    (arr/release-all! [input first-projected activated])
+    output))
 
 (defn- sdxl-label-vector [value conditioning tensor! layer]
   (let [pooled (:pooled conditioning)
@@ -78,20 +96,27 @@
              :expected-input expected-input}))
     (let [time-embedding (sinusoidal-vector (:backend value) time-ids
                                              (quot time-width 6))
-          input (t/cat [pooled time-embedding] 1)]
-      (linear (t/silu (linear input first-weight (tensor! (:first-bias layer))))
-              (tensor! (:second-weight layer)) (tensor! (:second-bias layer))))))
+          input (t/cat [pooled time-embedding] 1)
+          first-projected (linear input first-weight (tensor! (:first-bias layer)))
+          activated (t/silu first-projected)
+          output (linear activated (tensor! (:second-weight layer))
+                         (tensor! (:second-bias layer)))]
+      (arr/release-all! [time-embedding input first-projected activated])
+      output)))
 
 (defn- add-embedding [value embedding tensor! layer]
   (when-not embedding
     (fail "add-embedding requires a timestep/label embedding" {:layer layer}))
-  (let [projected (linear (t/silu embedding) (tensor! (:weight layer))
+  (let [activated (t/silu embedding)
+        projected (linear activated (tensor! (:weight layer))
                           (tensor! (:bias layer)))
         channels (second (:shape value))]
     (when-not (= [1 channels] (:shape projected))
       (fail "embedding projection must produce one value per channel"
             {:projected (:shape projected) :value (:shape value)}))
-    (t/add value (t/reshape projected [1 channels 1 1]))))
+    (let [output (add-channel-bias value projected)]
+      (arr/release-all! [activated projected])
+      output)))
 
 (defn- take-channels [value channels]
   (let [[_batch input-channels _height _width :as shape] (:shape value)]
@@ -229,13 +254,20 @@
          projected (:blocks layer))
         output (if (:linear-projection? layer)
                  (let [sequence (linear transformed (tensor! (:proj-out-weight layer))
-                                        (tensor! (:proj-out-bias layer)))]
-                   (t/transpose (t/reshape sequence [batch height width channels])
-                                [0 3 1 2]))
-                 (t/conv2d-nchw
-                  (t/transpose (t/reshape transformed [batch height width channels])
-                               [0 3 1 2])
-                  (tensor! (:proj-out-weight layer)) (tensor! (:proj-out-bias layer))))
+                                        (tensor! (:proj-out-bias layer)))
+                       nchw (t/transpose (t/reshape sequence
+                                                    [batch height width channels])
+                                         [0 3 1 2])]
+                   (arr/release! sequence)
+                   nchw)
+                 (let [nchw (t/transpose
+                             (t/reshape transformed [batch height width channels])
+                             [0 3 1 2])
+                       projected (t/conv2d-nchw
+                                  nchw (tensor! (:proj-out-weight layer))
+                                  (tensor! (:proj-out-bias layer)))]
+                   (arr/release! nchw)
+                   projected))
         result (nm/add residual output)]
     (arr/release! transformed)
     (arr/release! output)
@@ -322,13 +354,16 @@
                                 (into (mapv #(Math/sin %) angles)
                                       (mapv #(Math/cos %) angles))
                                 [1 embedding-dim])
-        hidden (t/silu (linear embedding first-weight first-bias))
+        first-projected (linear embedding first-weight first-bias)
+        hidden (t/silu first-projected)
         projected (linear hidden second-weight second-bias)
         channels (second (:shape value))]
     (when-not (= [1 channels] (:shape projected))
       (fail "timestep projection must produce [1 C]"
             {:projected (:shape projected) :channels channels}))
-    (t/add value (t/reshape projected [1 channels 1 1]))))
+    (let [output (add-channel-bias value projected)]
+      (arr/release-all! [embedding first-projected hidden projected])
+      output)))
 
 (defn- saved-use-counts [layers]
   (frequencies
