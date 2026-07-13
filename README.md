@@ -175,6 +175,11 @@ Unicode-aware splitting, ranked byte-pair merges, special tokens, and 77-token
 padding/truncation from standard `encoder.json` and `merges.txt` files. The
 executable `CLIPTextEncode` node turns prompt text plus a loaded CLIP component
 into token IDs and an attention mask inside the checkpoint-to-PNG graph.
+When a CLIP graph spec is present, it additionally executes checkpoint-backed
+token/position embeddings, pre-LayerNorm causal multi-head self-attention,
+QuickGELU MLP/residual blocks, and final LayerNorm, returning both
+`[1,77,hidden]` conditioning and pooled embeddings. Transformer tensors are
+loaded once and reused across repeated prompt encodes.
 
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
@@ -184,8 +189,8 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-This is not yet a complete SD/SDXL render: CLIP transformer encoding after
-tokenization, complete
+This is not yet a complete SD/SDXL render: automatic CLIP layer-name/config
+mapping, complete
 production block/config mapping after family detection, additional
 ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
 precision, and an installed real

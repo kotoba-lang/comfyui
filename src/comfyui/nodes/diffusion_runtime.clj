@@ -3,6 +3,7 @@
   contracts, every node in this pack performs real work: checkpoint catalog
   loading, latent allocation, or a DDIM transition."
   (:require [clojure.string :as str]
+            [comfyui.clip.encoder :as clip-encoder]
             [comfyui.diffusion.architecture :as architecture]
             [comfyui.diffusion.model :as diffusion-model]
             [comfyui.diffusion.scheduler :as scheduler]
@@ -68,11 +69,12 @@
   - `:vae-spec` decoder graph map, or resolver function
   - `:output-directory` destination for executable SaveImage PNG files
   - `:clip-tokenizer` OpenAI CLIP BPE tokenizer function
+  - `:clip-spec` checkpoint transformer graph for CLIP encoding
   - `:alphas-cumprod` schedule vector, or a resolver function
 
   The MODEL/CLIP/VAE maps share one lazy SafeTensorFile. The host owns its
   lifecycle and closes `:comfyui/checkpoint` when the workflow/model unloads."
-  [{:keys [backend resolve-checkpoint model-spec vae-spec alphas-cumprod
+  [{:keys [backend resolve-checkpoint model-spec vae-spec clip-spec alphas-cumprod
            output-directory clip-tokenizer]
     :or {resolve-checkpoint identity}}]
   [{:type "CheckpointLoaderSimple"
@@ -111,10 +113,18 @@
                   (assoc :comfyui/model-spec decoder-spec
                          :comfyui/decode
                          (diffusion-model/compile-decoder
-                          vae-component backend decoder-spec)))]
+                          vae-component backend decoder-spec)))
+                clip-component (component checkpoint :clip
+                                          ["cond_stage_model." "text_encoder." "clip."])
+                executable-clip
+                (cond-> clip-component
+                  clip-spec
+                  (assoc :comfyui/clip-spec clip-spec
+                         :comfyui/encode
+                         (clip-encoder/compile-encoder
+                          clip-component backend clip-spec)))]
             [executable-model
-             (component checkpoint :clip
-                        ["cond_stage_model." "text_encoder." "clip."])
+             executable-clip
              executable-vae]))}
    {:type "CLIPTextEncode"
     :category "conditioning"
@@ -126,7 +136,9 @@
                          (fn? clip-tokenizer))
             (throw (ex-info "CLIPTextEncode requires a CLIP component and tokenizer"
                             {:clip-keys (keys clip)})))
-          [(assoc (clip-tokenizer text) :clip clip :text text)])}
+          (let [tokenized (assoc (clip-tokenizer text) :clip clip :text text)
+                encode (:comfyui/encode clip)]
+            [(if encode (encode tokenized) tokenized)]))}
    {:type "EmptyLatentImage"
     :category "latent"
     :inputs {:width {:type "INT" :default 512}
