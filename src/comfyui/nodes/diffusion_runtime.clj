@@ -86,15 +86,16 @@
               {:name "VAE" :type "VAE"}]
     :fn (fn [{:keys [ckpt_name]}]
           (let [checkpoint (safe/open-file (resolve-checkpoint ckpt_name))
-                model-component (component checkpoint :model
-                                           ["model.diffusion_model."
-                                            "diffusion_model." "unet."])
-                architecture-info (architecture/infer checkpoint)
-                configured-spec (if (fn? model-spec)
-                                  (model-spec ckpt_name checkpoint) model-spec)
                 resolved-diffusers-config
                 (if (fn? diffusers-config)
                   (diffusers-config ckpt_name checkpoint) diffusers-config)
+                model-component (component checkpoint :model
+                                           (cond-> ["model.diffusion_model."
+                                                    "diffusion_model." "unet."]
+                                             resolved-diffusers-config (conj "")))
+                architecture-info (architecture/infer checkpoint)
+                configured-spec (if (fn? model-spec)
+                                  (model-spec ckpt_name checkpoint) model-spec)
                 spec (or configured-spec
                          (architecture/infer-unet-spec checkpoint architecture-info)
                          (when resolved-diffusers-config
