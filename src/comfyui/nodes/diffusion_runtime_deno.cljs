@@ -7,6 +7,7 @@
             [comfyui.png-deno :as png]
             [comfyui.safetensors-deno :as safe]
             [num.array :as arr]
+            [num.core :as nm]
             [num.tensor :as t]))
 
 (defn- component [checkpoint kind]
@@ -110,19 +111,58 @@
     :fn
     (fn [{:keys [model positive negative latent_image seed steps cfg
                  sampler_name scheduler denoise]}]
-      (when-not (and (= "ddim" sampler_name) (= "normal" scheduler)
-                     (= 1.0 (double denoise)) (fn? noise-fn))
-        (throw (ex-info "Deno KSampler currently requires full-denoise DDIM/normal"
+      (when-not (and (contains? #{"ddim" "euler" "euler_ancestral" "dpmpp_2m"}
+                                sampler_name)
+                     (contains? #{"normal" "karras"} scheduler)
+                     (not (and (= "ddim" sampler_name) (= "karras" scheduler)))
+                     (< 0.0 (double denoise) 1.0000000001)
+                     (fn? noise-fn))
+        (throw (ex-info "unsupported Deno sampler/scheduler/denoise combination"
                         {:sampler sampler_name :scheduler scheduler :denoise denoise})))
       (let [empty (:samples latent_image)
-            sample (noise-fn (:shape empty) seed backend)
-            sampled (scheduler/ddim-sample
-                     {:sample sample :alphas (:comfyui/alphas-cumprod model)
-                      :timesteps (timesteps-fn (:comfyui/alphas-cumprod model) steps)
-                      :denoise-fn (:comfyui/denoise model)
-                      :positive positive :negative negative :cfg cfg
-                      :final-alpha (first (:comfyui/alphas-cumprod model))})]
-        (arr/release-all! [empty sample])
+            alphas (:comfyui/alphas-cumprod model)
+            denoise-fn (:comfyui/denoise model)
+            denoise (double denoise)
+            total-steps (if (= 1.0 denoise)
+                          steps (max steps (long (/ steps denoise))))
+            karras? (= "karras" scheduler)
+            explicit-sigmas (when karras?
+                              (vec (take-last
+                                    (inc steps)
+                                    (scheduler/karras-sigmas
+                                     total-steps
+                                     (scheduler/alpha->sigma (double (first alphas)))
+                                     (scheduler/alpha->sigma (double (last alphas)))))))
+            timesteps (if karras?
+                        (mapv #(scheduler/sigma->timestep alphas %)
+                              (butlast explicit-sigmas))
+                        (vec (take-last steps (timesteps-fn alphas total-steps))))
+            initial-timestep (first timesteps)
+            sample-noise (fn [shape timestep]
+                           (noise-fn shape (+ (long seed) (long timestep)) backend))
+            initial-noise (sample-noise (:shape empty) initial-timestep)
+            initial-sample
+            (case sampler_name
+              "ddim" (if (= 1.0 denoise)
+                       (t/add empty initial-noise)
+                       (scheduler/add-noise
+                        empty initial-noise (double (nth alphas initial-timestep))))
+              (let [sigma (if explicit-sigmas
+                            (first explicit-sigmas)
+                            (scheduler/alpha->sigma
+                             (double (nth alphas initial-timestep))))]
+                (t/add empty (nm/scal! sigma initial-noise))))
+            args {:sample initial-sample :alphas alphas :timesteps timesteps
+                  :sigmas explicit-sigmas :denoise-fn denoise-fn
+                  :positive positive :negative negative :cfg cfg
+                  :final-alpha (first alphas) :eta 0.0 :noise-fn sample-noise}
+            sampled (case sampler_name
+                      "ddim" (scheduler/ddim-sample args)
+                      "euler" (scheduler/euler-sample args)
+                      "euler_ancestral"
+                      (scheduler/euler-ancestral-sample (assoc args :eta 1.0))
+                      "dpmpp_2m" (scheduler/dpmpp-2m-sample args))]
+        (arr/release-all! [empty initial-noise initial-sample])
         [{:samples (:sample sampled) :history (:history sampled)}]))}
    {:type "VAEDecode"
     :category "latent"

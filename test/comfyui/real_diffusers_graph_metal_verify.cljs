@@ -22,13 +22,16 @@
     result))
 
 (defn -main
-  [& [spec-path unet-path text-path vae-path output-directory]]
+  [& [spec-path unet-path text-path vae-path output-directory
+      sampler-name scheduler-name]]
   (when-not output-directory
     (throw (ex-info "usage: SPEC UNET TEXT VAE OUTPUT_DIRECTORY" {})))
   (let [{:keys [unet clip vae alphas positive negative]}
         (reader/read-string (js/Deno.readTextFileSync spec-path))
         f16? (every? f16-file? [unet-path text-path vae-path])
-        direct? (boolean (resolve 'num.deno-gpu/upload-byte-view))]
+        direct? (boolean (resolve 'num.deno-gpu/upload-byte-view))
+        sampler-name (or sampler-name "ddim")
+        scheduler-name (or scheduler-name "normal")]
     (-> (dg/request-device)
         (.then
          (fn [request]
@@ -65,7 +68,7 @@
                        :inputs {:model ["1" 0] :positive ["2" 0]
                                 :negative ["3" 0] :latent_image ["4" 0]
                                 :seed 0 :steps 2 :cfg 2.0
-                                :sampler_name "ddim" :scheduler "normal"
+                                :sampler_name sampler-name :scheduler scheduler-name
                                 :denoise 1.0}}
                   "6" {:class_type "VAEDecode"
                        :inputs {:samples ["5" 0] :vae ["1" 2]}}
@@ -78,7 +81,8 @@
                     (let [components (get-in execution [:results "1"])
                           positive-result (get-in execution [:results "2" 0])
                           negative-result (get-in execution [:results "3" 0])
-                          latent (get-in execution [:results "5" 0 :samples])
+                          sample-result (get-in execution [:results "5" 0])
+                          latent (:samples sample-result)
                           image (get-in execution [:results "6" 0])
                           ui (get-in execution [:results "7" 0])
                           reader-stats (mapv #(safe/reader-stats
@@ -106,12 +110,16 @@
                                     (> (.-byteLength png-bytes) 500)
                                     (or (not direct?)
                                         (every? pos? (map :direct-uploads reader-stats)))
-                                    (close? (if f16? 15.374797308671601
-                                                15.379568099975586)
-                                            (reduce + latent-values) 1.0e-3)
-                                    (close? (if f16? 391.73747777734826
-                                                391.7310791015625)
-                                            (reduce + image-values) 1.0e-2)
+                                    (= 2 (count (:history sample-result)))
+                                    (every? #(js/Number.isFinite %) latent-values)
+                                    (every? #(js/Number.isFinite %) image-values)
+                                    (or (not= "ddim" sampler-name)
+                                        (and (close? (if f16? 15.374797308671601
+                                                         15.379568099975586)
+                                                     (reduce + latent-values) 1.0e-3)
+                                             (close? (if f16? 391.73747777734826
+                                                         391.7310791015625)
+                                                     (reduce + image-values) 1.0e-2)))
                                     (= (:live-buffers baseline) (:live-buffers stats))
                                     (= (:live-bytes baseline) (:live-bytes stats)))
                              (throw (ex-info "real ComfyUI Metal graph verification failed"
@@ -126,6 +134,7 @@
                                     "png-bytes" (.-byteLength png-bytes)
                                     "peak-bytes" (:peak-live-bytes stats)
                                     "checkpoint-dtype" (if f16? "F16" "F32")
+                                    "sampler" sampler-name "scheduler" scheduler-name
                                     "output" path)))))))))))
         (.catch (fn [error]
                   (println "ERROR:" (or (.-stack error) (str error)))

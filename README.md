@@ -443,6 +443,15 @@ Both F32 and fully converted F16 public checkpoints execute all seven nodes,
 match their independent numerical oracles, emit 852/848-byte PNGs, close the
 three lazy files, release conditioning/latent/image and all cached weights, and
 finish at zero tracked GPU buffers. The measured F32 peak is 7,738,644 bytes.
+The Deno `KSampler` shares the production scheduler implementations with the
+JVM runtime: `ddim`, `euler`, `euler_ancestral`, and `dpmpp_2m`, using `normal`
+or Karras rho-7 sigma schedules where valid, plus partial-denoise timestep
+slicing. Initial and ancestral noise remain an injected seeded host function.
+The real F32 seven-node graph was run for all seven valid sampler/scheduler
+combinations; every run produced a finite 16×16 PNG and returned to zero live
+GPU buffers, with PNG sizes from 847 to 859 bytes. DDIM additionally retains its
+pinned PyTorch trajectory comparison; the scheduler's dedicated live Metal gate
+provides CPU parity for Euler/ancestral/DPM++ transitions.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
