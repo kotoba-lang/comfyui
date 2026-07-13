@@ -13,7 +13,8 @@
 
 (def ^:private supported-ops
   #{:conv2d :groupnorm :silu :save :add-saved :cat-saved :upsample
-    :scale :add-conditioning :cross-attention :timestep-bias :timestep-embedding})
+    :scale :add-conditioning :cross-attention :timestep-bias :timestep-embedding
+    :timestep-vector :sdxl-label-embedding :add-embedding})
 
 (defn- fail [message data]
   (throw (ex-info (str "comfyui.diffusion.model: " message) data)))
@@ -28,6 +29,60 @@
 (defn- linear [x weight bias]
   (let [output (t/matmul x (t/transpose weight))]
     (if bias (t/add output bias) output)))
+
+(defn- sinusoidal-vector [backend values embedding-dim]
+  (when-not (and (even? embedding-dim) (>= embedding-dim 2))
+    (fail "sinusoidal embedding dimension must be positive and even"
+          {:dimension embedding-dim}))
+  (let [half (quot embedding-dim 2)
+        denominator (max 1 (dec half))
+        frequencies (mapv #(Math/exp (* -1.0 (Math/log 10000.0)
+                                           (/ % denominator)))
+                          (range half))]
+    (arr/from-vec
+     backend
+     (vec (mapcat (fn [value]
+                    (let [angles (mapv #(* (double value) %) frequencies)]
+                      (concat (mapv #(Math/sin %) angles)
+                              (mapv #(Math/cos %) angles))))
+                  values))
+     [1 (* (count values) embedding-dim)])))
+
+(defn- timestep-vector [value timestep tensor! layer]
+  (let [first-weight (tensor! (:first-weight layer))
+        input-dim (second (:shape first-weight))
+        input (sinusoidal-vector (:backend value) [timestep] input-dim)]
+    (linear (t/silu (linear input first-weight (tensor! (:first-bias layer))))
+            (tensor! (:second-weight layer)) (tensor! (:second-bias layer)))))
+
+(defn- sdxl-label-vector [value conditioning tensor! layer]
+  (let [pooled (:pooled conditioning)
+        time-ids (:time-ids conditioning)
+        first-weight (tensor! (:first-weight layer))
+        expected-input (second (:shape first-weight))
+        pooled-width (when pooled (last (:shape pooled)))
+        time-width (when pooled-width (- expected-input pooled-width))]
+    (when-not (and pooled (= 2 (count (:shape pooled))) (= 1 (first (:shape pooled)))
+                   (= 6 (count time-ids)) (pos? time-width) (zero? (mod time-width 6)))
+      (fail "SDXL label embedding requires pooled [1 P] and six time IDs"
+            {:pooled (some-> pooled :shape) :time-ids time-ids
+             :expected-input expected-input}))
+    (let [time-embedding (sinusoidal-vector (:backend value) time-ids
+                                             (quot time-width 6))
+          input (t/cat [pooled time-embedding] 1)]
+      (linear (t/silu (linear input first-weight (tensor! (:first-bias layer))))
+              (tensor! (:second-weight layer)) (tensor! (:second-bias layer))))))
+
+(defn- add-embedding [value embedding tensor! layer]
+  (when-not embedding
+    (fail "add-embedding requires a timestep/label embedding" {:layer layer}))
+  (let [projected (linear (t/silu embedding) (tensor! (:weight layer))
+                          (tensor! (:bias layer)))
+        channels (second (:shape value))]
+    (when-not (= [1 channels] (:shape projected))
+      (fail "embedding projection must produce one value per channel"
+            {:projected (:shape projected) :value (:shape value)}))
+    (t/add value (t/reshape projected [1 channels 1 1]))))
 
 (defn- cross-attention
   [value condition tensor! layer]
@@ -114,7 +169,7 @@
                           tensor))))]
     (with-meta
       (fn [sample timestep conditioning]
-        (let [initial {:value sample :saved {}}
+        (let [initial {:value sample :saved {} :embedding nil}
               result
               (reduce
                (fn [{:keys [value saved] :as state} layer]
@@ -183,6 +238,21 @@
                    :timestep-embedding
                    (assoc state :value
                           (timestep-embedding value timestep tensor! layer))
+
+                   :timestep-vector
+                   (assoc state :embedding
+                          (timestep-vector value timestep tensor! layer))
+
+                   :sdxl-label-embedding
+                   (let [label (sdxl-label-vector value conditioning tensor! layer)]
+                     (assoc state :embedding
+                            (if-let [embedding (:embedding state)]
+                              (nm/add embedding label)
+                              label)))
+
+                   :add-embedding
+                   (assoc state :value
+                          (add-embedding value (:embedding state) tensor! layer))
 
                    :timestep-bias
                    (let [bias (* (double (or (:scale layer) 1.0)) (double timestep))

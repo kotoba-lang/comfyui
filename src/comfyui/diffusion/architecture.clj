@@ -68,6 +68,31 @@
     (scheduler/alphas-cumprod
      (scheduler/scaled-linear-betas 1000 0.00085 0.012))))
 
+(defn infer-sdxl-conditioning-layers
+  "Infer the shared SDXL timestep and pooled/time-ID label MLP prefix. Returns
+  graph layers that populate the embedding state, or nil when incomplete."
+  [checkpoint {:keys [family]}]
+  (when (contains? #{:stable-diffusion-xl-base :stable-diffusion-xl-refiner} family)
+    (let [names (set (safe/tensor-names checkpoint))
+          name! (fn [suffix] (find-name names suffix))
+          time-first-weight (name! "diffusion_model.time_embed.0.weight")
+          time-first-bias (name! "diffusion_model.time_embed.0.bias")
+          time-second-weight (name! "diffusion_model.time_embed.2.weight")
+          time-second-bias (name! "diffusion_model.time_embed.2.bias")
+          label-first-weight (name! "diffusion_model.label_emb.0.0.weight")
+          label-first-bias (name! "diffusion_model.label_emb.0.0.bias")
+          label-second-weight (name! "diffusion_model.label_emb.0.2.weight")
+          label-second-bias (name! "diffusion_model.label_emb.0.2.bias")
+          required [time-first-weight time-first-bias time-second-weight time-second-bias
+                    label-first-weight label-first-bias label-second-weight label-second-bias]]
+      (when (every? some? required)
+        [{:op :timestep-vector
+          :first-weight time-first-weight :first-bias time-first-bias
+          :second-weight time-second-weight :second-bias time-second-bias}
+         {:op :sdxl-label-embedding
+          :first-weight label-first-weight :first-bias label-first-bias
+          :second-weight label-second-weight :second-bias label-second-bias}]))))
+
 (defn- infer-hf-clip-spec [checkpoint names root]
     (let [token-name (str root "embeddings.token_embedding.weight")
           position-name (str root "embeddings.position_embedding.weight")

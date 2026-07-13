@@ -62,3 +62,42 @@
     (testing "cross-attention rejects a ComfyUI conditioning shape it cannot lower"
       (is (thrown? clojure.lang.ExceptionInfo
                    (denoise sample 10 (arr/from-vec backend [1 2 3] [3])))))))
+
+(deftest sdxl-pooled-time-ids-flow-through-label-and-resblock-embedding
+  (let [zeros4 (arr/from-vec backend [0 0 0 0] [4])
+        arrays
+        {"time.0.w" (arr/from-vec backend (identity-values 4 4 0.3) [4 4])
+         "time.0.b" zeros4
+         "time.2.w" (arr/from-vec backend (identity-values 4 4 0.4) [4 4])
+         "time.2.b" zeros4
+         "label.0.w" (arr/from-vec backend
+                                       (mapv #(* 0.002 (inc %)) (range 56)) [4 14])
+         "label.0.b" zeros4
+         "label.2.w" (arr/from-vec backend (identity-values 4 4 0.5) [4 4])
+         "label.2.b" zeros4
+         "emb.w" (arr/from-vec backend [0.3 0.1 -0.2 0.4,
+                                         -0.1 0.2 0.5 0.3] [2 4])
+         "emb.b" (arr/from-vec backend [0.01 -0.02] [2])}
+        reads (atom 0)
+        component {:comfyui/read-tensor
+                   (fn [_ name] (swap! reads inc) (get arrays name))}
+        spec {:layers
+              [{:op :timestep-vector
+                :first-weight "time.0.w" :first-bias "time.0.b"
+                :second-weight "time.2.w" :second-bias "time.2.b"}
+               {:op :sdxl-label-embedding
+                :first-weight "label.0.w" :first-bias "label.0.b"
+                :second-weight "label.2.w" :second-bias "label.2.b"}
+               {:op :add-embedding :weight "emb.w" :bias "emb.b"}]}
+        denoise (model/compile-denoiser component backend spec)
+        sample (arr/zeros backend [1 2 2 2])
+        pooled (arr/from-vec backend [0.25 -0.5] [1 2])
+        condition-a {:pooled pooled :time-ids [1024 1024 0 0 1024 1024]}
+        condition-b {:pooled pooled :time-ids [768 1344 16 0 768 1344]}
+        output-a (denoise sample 10 condition-a)
+        output-b (denoise sample 10 condition-b)]
+    (is (= [1 2 2 2] (:shape output-a)))
+    (is (not= (arr/->vec output-a) (arr/->vec output-b)))
+    (is (= 10 @reads))
+    (denoise sample 20 condition-a)
+    (is (= 10 @reads) "SDXL embedding tensors remain cached")))

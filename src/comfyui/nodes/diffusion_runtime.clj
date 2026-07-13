@@ -91,6 +91,13 @@
                 spec (if (fn? model-spec)
                        (model-spec ckpt_name checkpoint) model-spec)
                 architecture-info (architecture/infer checkpoint)
+                conditioning-layers (architecture/infer-sdxl-conditioning-layers
+                                     checkpoint architecture-info)
+                effective-spec
+                (if (and spec conditioning-layers
+                         (not-any? #(= :timestep-vector (:op %)) (:layers spec)))
+                  (update spec :layers #(into (vec conditioning-layers) %))
+                  spec)
                 resolved-clip-spec (or clip-spec
                                        (architecture/infer-clip-spec
                                         checkpoint architecture-info))
@@ -103,10 +110,10 @@
                                (vae-spec ckpt_name checkpoint) vae-spec)
                 executable-model
                 (cond-> (assoc model-component :comfyui/architecture architecture-info)
-                  spec (assoc :comfyui/model-spec spec
+                  effective-spec (assoc :comfyui/model-spec effective-spec
                               :comfyui/denoise
                               (diffusion-model/compile-denoiser
-                               model-component backend spec))
+                               model-component backend effective-spec))
                   alphas (assoc :comfyui/alphas-cumprod (vec alphas)))
                 vae-component (component checkpoint :vae
                                          ["first_stage_model." "vae."])

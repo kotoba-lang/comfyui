@@ -199,6 +199,12 @@ The executable `CLIPTextEncodeSDXL` node carries original width/height, crop
 offset, and target width/height as the standard six time IDs alongside token
 conditioning and the projected pooled embedding. Invalid negative dimensions
 or a non-dual encoder result fail before sampling.
+When all standard `diffusion_model.time_embed.*` and
+`diffusion_model.label_emb.0.*` tensors exist, the checkpoint loader now
+prepends executable timestep and SDXL label-vector construction automatically.
+The graph concatenates projected pooled CLIP-G with sinusoidal embeddings of
+the six time IDs, runs the learned label MLP, adds it to the timestep vector,
+and exposes that shared state to ResBlock `:add-embedding` projections.
 
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
@@ -208,8 +214,8 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-This is not yet a complete SD/SDXL render: SDXL label-embedding execution from
-pooled/time-ID conditioning, complete
+This is not yet a complete SD/SDXL render: automatic enumeration of every
+ResBlock/downsample/upsample/transformer block, complete
 production block/config mapping after family detection, additional
 ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
 precision, and an installed real

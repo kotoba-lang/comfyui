@@ -119,3 +119,21 @@
     (is (= [768 1280] (mapv :hidden (:encoders spec))))
     (is (:return-penultimate? (second (:encoders spec))))
     (is (string? (:in-proj-weight (first (:layers (second (:encoders spec)))))))))
+
+(deftest infers-complete-sdxl-time-and-label-embedding-prefix
+  (let [suffixes ["time_embed.0.weight" "time_embed.0.bias"
+                  "time_embed.2.weight" "time_embed.2.bias"
+                  "label_emb.0.0.weight" "label_emb.0.0.bias"
+                  "label_emb.0.2.weight" "label_emb.0.2.bias"]
+        checkpoint* (update (checkpoint 2048 4 true) :tensors merge
+                            (into {} (map (fn [suffix]
+                                           [(str "model.diffusion_model." suffix)
+                                            {"shape" [1280]}]) suffixes)))
+        info (architecture/infer checkpoint*)
+        layers (architecture/infer-sdxl-conditioning-layers checkpoint* info)]
+    (is (= [:timestep-vector :sdxl-label-embedding] (mapv :op layers)))
+    (is (= "model.diffusion_model.label_emb.0.2.weight"
+           (:second-weight (second layers))))
+    (is (nil? (architecture/infer-sdxl-conditioning-layers
+               (update checkpoint* :tensors dissoc
+                       "model.diffusion_model.label_emb.0.2.bias") info)))))
