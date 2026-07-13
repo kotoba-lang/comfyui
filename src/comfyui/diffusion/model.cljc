@@ -31,28 +31,36 @@
   (let [output (t/matmul x (t/transpose weight))]
     (if bias (t/add output bias) output)))
 
-(defn- sinusoidal-vector [backend values embedding-dim]
+(defn- sinusoidal-vector
+  ([backend values embedding-dim]
+   (sinusoidal-vector backend values embedding-dim false 1.0))
+  ([backend values embedding-dim flip-sin-to-cos?]
+   (sinusoidal-vector backend values embedding-dim flip-sin-to-cos? 1.0))
+  ([backend values embedding-dim flip-sin-to-cos? frequency-shift]
   (when-not (and (even? embedding-dim) (>= embedding-dim 2))
     (fail "sinusoidal embedding dimension must be positive and even"
           {:dimension embedding-dim}))
   (let [half (quot embedding-dim 2)
-        denominator (max 1 (dec half))
+        denominator (max 1.0 (- half (double frequency-shift)))
         frequencies (mapv #(Math/exp (* -1.0 (Math/log 10000.0)
                                      (/ % denominator)))
                           (range half))]
     (arr/from-vec
      backend
      (vec (mapcat (fn [value]
-                    (let [angles (mapv #(* (double value) %) frequencies)]
-                      (concat (mapv #(Math/sin %) angles)
-                              (mapv #(Math/cos %) angles))))
+                    (let [angles (mapv #(* (double value) %) frequencies)
+                          sin (mapv #(Math/sin %) angles)
+                          cos (mapv #(Math/cos %) angles)]
+                      (if flip-sin-to-cos? (concat cos sin) (concat sin cos))))
                   values))
-     [1 (* (count values) embedding-dim)])))
+     [1 (* (count values) embedding-dim)]))))
 
 (defn- timestep-vector [value timestep tensor! layer]
   (let [first-weight (tensor! (:first-weight layer))
         input-dim (second (:shape first-weight))
-        input (sinusoidal-vector (:backend value) [timestep] input-dim)]
+        input (sinusoidal-vector (:backend value) [timestep] input-dim
+                                 (boolean (:flip-sin-to-cos? layer))
+                                 (double (or (:frequency-shift layer) 1.0)))]
     (linear (t/silu (linear input first-weight (tensor! (:first-bias layer))))
             (tensor! (:second-weight layer)) (tensor! (:second-bias layer)))))
 

@@ -118,6 +118,7 @@
                    :comfyui/architecture {:family :diffusers-stable-diffusion}
                    :comfyui/model-spec model-spec
                    :comfyui/alphas-cumprod (vec (diffusers-alphas scheduler-config))
+                   :comfyui/scheduler-config scheduler-config
                    :comfyui/denoise
                    (diffusion-model/compile-denoiser model-component backend model-spec))
             (assoc clip-component :comfyui/clip-spec clip-spec
@@ -361,6 +362,7 @@
                             {:sampler-name sampler_name :scheduler scheduler :denoise denoise})))
           (let [denoise-fn (:comfyui/denoise model)
                 alphas (:comfyui/alphas-cumprod model)
+                scheduler-config (:comfyui/scheduler-config model)
                 sample (if (and (map? latent_image) (contains? latent_image :samples))
                          (:samples latent_image)
                          latent_image)
@@ -372,7 +374,14 @@
                            (arr/from-vec (:backend sample)
                                          (repeatedly (arr/nelems shape) #(.nextGaussian random))
                                          shape))
-                timesteps (scheduler/select-timesteps (count alphas) steps)
+                timesteps (scheduler/select-timesteps
+                           (count alphas) steps
+                           (if scheduler-config
+                             {:spacing (or (config-value scheduler-config
+                                                         "timestep_spacing") "linspace")
+                              :steps-offset (long (or (config-value scheduler-config
+                                                                   "steps_offset") 0))}
+                             {}))
                 initial-timestep (first timesteps)
                 initial-noise (noise-fn (:shape sample) initial-timestep)
                 initial-sample
@@ -388,6 +397,10 @@
                  :timesteps timesteps
                  :denoise-fn denoise-fn
                  :positive positive :negative negative :cfg cfg
+                 :final-alpha (if (and scheduler-config
+                                       (false? (config-value scheduler-config
+                                                             "set_alpha_to_one")))
+                                (first alphas) 1.0)
                  :eta 0.0 :noise-fn noise-fn}
                 result (case sampler_name
                          "ddim" (scheduler/ddim-sample sampler-args)

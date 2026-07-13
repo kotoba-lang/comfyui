@@ -261,7 +261,11 @@ clojure -M:real-diffusers-pipeline-verify \
 The real verifiers also pin numerical reference values produced from the same
 inputs by PyTorch 2.13, Diffusers 0.39, and Transformers 5.13. CLIP's first
 hidden-state values agree within `1e-5`; VAE pixels agree within `1e-4` with a
-total image-sum error below `1e-2`.
+total image-sum error below `1e-2`; UNet epsilon values agree within `1e-4`.
+UNet timestep embeddings preserve Diffusers' `flip_sin_to_cos` and `freq_shift`
+configuration. Multi-step sampling likewise preserves `linspace`, `leading`,
+or `trailing` timestep spacing, `steps_offset`, and `set_alpha_to_one` rather
+than silently substituting a generic schedule.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against

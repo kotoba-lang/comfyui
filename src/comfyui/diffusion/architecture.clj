@@ -538,7 +538,9 @@
                   :first-weight "time_embedding.linear_1.weight"
                   :first-bias "time_embedding.linear_1.bias"
                   :second-weight "time_embedding.linear_2.weight"
-                  :second-bias "time_embedding.linear_2.bias"}
+                  :second-bias "time_embedding.linear_2.bias"
+                  :flip-sin-to-cos? (boolean (getc "flip_sin_to_cos"))
+                  :frequency-shift (double (or (getc "freq_shift") 0.0))}
                  {:op :conv2d :weight "conv_in.weight" :bias "conv_in.bias" :padding 1}
                  (save!)]
         encoder

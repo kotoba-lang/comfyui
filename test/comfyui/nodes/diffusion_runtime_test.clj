@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [comfyui.exec :as exec]
             [comfyui.clip.tokenizer :as clip-tokenizer]
+            [comfyui.diffusion.scheduler :as scheduler]
             [comfyui.node :as node]
             [comfyui.nodes.diffusion-runtime :as runtime]
             [comfyui.safetensors :as safe]
@@ -132,6 +133,27 @@
     (is (not= (arr/->vec sample) (arr/->vec ancestral)))
     (is (= (arr/->vec ddim) (arr/->vec ddim-again)))
     (is (not= (arr/->vec ddim) (arr/->vec ddim-other-seed)))))
+
+(deftest ksampler-honors-diffusers-leading-timestep-config
+  (let [registry (node/registry (runtime/pack {:backend backend}))
+        calls (atom [])
+        zero (arr/zeros backend [1 1 1 1])
+        model {:comfyui/alphas-cumprod
+               (scheduler/alphas-cumprod
+                (scheduler/scaled-linear-betas 1000 0.00085 0.012))
+               :comfyui/scheduler-config {"timestep_spacing" "leading"
+                                           "steps_offset" 1
+                                           "set_alpha_to_one" false}
+               :comfyui/denoise (fn [sample timestep _conditioning]
+                                   (swap! calls conj timestep)
+                                   (arr/zeros backend (:shape sample)))}
+        workflow {"sample" {:class_type "KSampler"
+                            :inputs {:model model :positive zero :negative zero
+                                     :latent_image zero :seed 7 :steps 2 :cfg 1.0
+                                     :sampler_name "ddim" :scheduler "normal"
+                                     :denoise 1.0}}}]
+    (exec/execute {:registry registry} workflow)
+    (is (= [501 501 1 1] @calls))))
 
 (deftest checkpoint-backed-unet-graph-runs-through-ksampler
   (let [prefix "model.diffusion_model."
