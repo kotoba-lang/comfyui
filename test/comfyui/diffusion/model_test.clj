@@ -301,8 +301,14 @@
         condition-a {:tensor (arr/from-vec backend [0.2 -0.1, 0.4 0.3, -0.2 0.5]
                                                    [1 3 2])}
         condition-b {:tensor (arr/from-vec backend [1 0, 0 1, -1 0.5] [1 3 2])}
-        output-a (denoise sample 0 condition-a)
-        output-b (denoise sample 0 condition-b)]
+        released (atom [])
+        [output-a output-b]
+        (with-redefs [arr/release! (fn [tensor] (swap! released conj tensor))]
+          [(denoise sample 0 condition-a) (denoise sample 0 condition-b)])]
     (is (= (:shape sample) (:shape output-a)))
     (is (every? #(Double/isFinite %) (arr/->vec output-a)))
-    (is (not= (arr/->vec output-a) (arr/->vec output-b)))))
+    (is (not= (arr/->vec output-a) (arr/->vec output-b)))
+    (is (pos? (count @released)))
+    (is (not-any? #(identical? (:handle sample) (:handle %)) @released))
+    (is (not-any? #(identical? (:handle output-a) (:handle %)) @released))
+    (is (not-any? #(identical? (:handle output-b) (:handle %)) @released))))

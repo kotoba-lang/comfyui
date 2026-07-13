@@ -187,14 +187,20 @@
                                             (tensor! (:norm-weight layer))
                                             (tensor! (:norm-bias layer)) 1.0e-6)
         projected (if (:linear-projection? layer)
-                    (linear (t/reshape (t/transpose normalized [0 2 3 1])
-                                       [batch (* height width) channels])
-                            (tensor! (:proj-in-weight layer))
-                            (tensor! (:proj-in-bias layer)))
+                    (let [sequence (t/reshape (t/transpose normalized [0 2 3 1])
+                                              [batch (* height width) channels])
+                          output (linear sequence
+                                         (tensor! (:proj-in-weight layer))
+                                         (tensor! (:proj-in-bias layer)))]
+                      (arr/release! sequence)
+                      output)
                     (let [nchw (t/conv2d-nchw normalized (tensor! (:proj-in-weight layer))
-                                              (tensor! (:proj-in-bias layer)))]
-                      (t/reshape (t/transpose nchw [0 2 3 1])
-                                 [batch (* height width) channels])))
+                                              (tensor! (:proj-in-bias layer)))
+                          sequence (t/reshape (t/transpose nchw [0 2 3 1])
+                                              [batch (* height width) channels])]
+                      (arr/release! nchw)
+                      sequence))
+        _ (arr/release! normalized)
         transformed
         (reduce
          (fn [x block]
@@ -203,15 +209,23 @@
                                         (tensor! (:norm1-bias block)) 1.0e-5)
                  self-output (sequence-attention self-input self-input tensor!
                                                  (:self-attention block) heads)
-                 x (nm/add x self-output)
-                 cross-input (layer-norm x (tensor! (:norm2-weight block))
+                 after-self (nm/add x self-output)
+                 _ (doseq [temporary [x self-input self-output]]
+                     (arr/release! temporary))
+                 cross-input (layer-norm after-self (tensor! (:norm2-weight block))
                                          (tensor! (:norm2-bias block)) 1.0e-5)
                  cross-output (sequence-attention cross-input context tensor!
                                                   (:cross-attention block) heads)
-                 x (nm/add x cross-output)
-                 ff-input (layer-norm x (tensor! (:norm3-weight block))
-                                      (tensor! (:norm3-bias block)) 1.0e-5)]
-             (nm/add x (geglu ff-input tensor! (:feed-forward block)))))
+                 after-cross (nm/add after-self cross-output)
+                 _ (doseq [temporary [after-self cross-input cross-output]]
+                     (arr/release! temporary))
+                 ff-input (layer-norm after-cross (tensor! (:norm3-weight block))
+                                      (tensor! (:norm3-bias block)) 1.0e-5)
+                 ff-output (geglu ff-input tensor! (:feed-forward block))
+                 result (nm/add after-cross ff-output)]
+             (doseq [temporary [after-cross ff-input ff-output]]
+               (arr/release! temporary))
+             result))
          projected (:blocks layer))
         output (if (:linear-projection? layer)
                  (let [sequence (linear transformed (tensor! (:proj-out-weight layer))
@@ -221,8 +235,11 @@
                  (t/conv2d-nchw
                   (t/transpose (t/reshape transformed [batch height width channels])
                                [0 3 1 2])
-                  (tensor! (:proj-out-weight layer)) (tensor! (:proj-out-bias layer))))]
-    (nm/add residual output)))
+                  (tensor! (:proj-out-weight layer)) (tensor! (:proj-out-bias layer))))
+        result (nm/add residual output)]
+    (arr/release! transformed)
+    (arr/release! output)
+    result))
 
 (defn- cross-attention
   [value condition tensor! layer]
