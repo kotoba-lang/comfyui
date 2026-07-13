@@ -119,14 +119,32 @@
 (defn read-tensor
   "Read one named tensor and upload it to `backend` as a num NDArray. Supports
   the numeric safetensors dtypes used by diffusion checkpoints, including
-  F16/BF16/F32 without converting the entire checkpoint."
-  [^SafeTensorFile checkpoint backend tensor-name]
-  (let [{:strs [dtype shape data_offsets] :as info} (tensor-info checkpoint tensor-name)]
-    (when-not info
-      (throw (ex-info "safetensors tensor not found"
-                      {:tensor tensor-name :path (:path checkpoint)})))
-    (let [[start end] data_offsets
-          byte-count (- end start)
-          buffer (doto (ByteBuffer/allocate (int byte-count)) (.order ByteOrder/LITTLE_ENDIAN))]
-      (read-fully-at! (:channel checkpoint) buffer (+ (:data-start checkpoint) start))
-      (arr/from-vec backend (decode-values buffer dtype (nelems shape)) (mapv long shape)))))
+  F16/BF16/F32 without converting the entire checkpoint.
+
+  `:dtype-policy` is `:f32` (the compatibility default) or `:native`. Native
+  preserves F16 and BF16 as physical two-byte num storage; all other
+  safetensors numeric types are uploaded as F32 because num intentionally has
+  no integer/F64 tensor storage yet."
+  ([checkpoint backend tensor-name]
+   (read-tensor checkpoint backend tensor-name {}))
+  ([^SafeTensorFile checkpoint backend tensor-name
+    {:keys [dtype-policy] :or {dtype-policy :f32}}]
+   (when-not (contains? #{:f32 :native} dtype-policy)
+     (throw (ex-info "safetensors dtype-policy must be :f32 or :native"
+                     {:dtype-policy dtype-policy})))
+   (let [{:strs [dtype shape data_offsets] :as info} (tensor-info checkpoint tensor-name)]
+     (when-not info
+       (throw (ex-info "safetensors tensor not found"
+                       {:tensor tensor-name :path (:path checkpoint)})))
+     (let [[start end] data_offsets
+           byte-count (- end start)
+           storage-dtype (if (= :native dtype-policy)
+                           (case dtype "F16" :f16 "BF16" :bf16 :f32)
+                           :f32)
+           buffer (doto (ByteBuffer/allocate (int byte-count))
+                    (.order ByteOrder/LITTLE_ENDIAN))]
+       (read-fully-at! (:channel checkpoint) buffer (+ (:data-start checkpoint) start))
+       (arr/from-vec backend
+                     (decode-values buffer dtype (nelems shape))
+                     (mapv long shape)
+                     storage-dtype)))))

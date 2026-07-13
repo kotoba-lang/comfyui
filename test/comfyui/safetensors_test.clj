@@ -45,7 +45,21 @@
           (testing name
             (let [tensor (safe/read-tensor checkpoint backend name)]
               (is (= [2] (:shape tensor)))
+              (is (= :f32 (:dtype tensor)))
               (is (= expected (arr/->vec tensor))))))
+        (testing "native half storage"
+          (doseq [[name expected-dtype expected]
+                  [["half.weight" :f16 [1.0 -2.0]]
+                   ["bfloat.weight" :bf16 [1.5 -2.25]]]]
+            (let [tensor (safe/read-tensor checkpoint backend name
+                                           {:dtype-policy :native})]
+              (is (= expected-dtype (:dtype tensor)))
+              (is (= expected-dtype (get-in tensor [:handle :dtype])))
+              (is (= 2 (alength ^shorts (get-in tensor [:handle :data]))))
+              (is (= expected (arr/->vec tensor))))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"dtype-policy"
+                              (safe/read-tensor checkpoint backend "half.weight"
+                                                {:dtype-policy :float16})))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not found"
                               (safe/read-tensor checkpoint backend "missing"))))
       (finally

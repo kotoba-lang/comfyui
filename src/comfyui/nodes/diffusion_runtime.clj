@@ -47,7 +47,7 @@
            {:filename filename :subfolder "" :type "output" :path (str path)}))
        (range batch)))))
 
-(defn- component [checkpoint kind prefixes]
+(defn- component [checkpoint kind prefixes checkpoint-dtype-policy]
   (let [names (filterv #(some (fn [prefix] (str/starts-with? % prefix)) prefixes)
                        (safe/tensor-names checkpoint))]
     {:comfyui/component kind
@@ -57,7 +57,8 @@
                             (when-not (some #{tensor-name} names)
                               (throw (ex-info "tensor does not belong to checkpoint component"
                                               {:component kind :tensor tensor-name})))
-                            (safe/read-tensor checkpoint backend tensor-name))}))
+                            (safe/read-tensor checkpoint backend tensor-name
+                                              {:dtype-policy checkpoint-dtype-policy}))}))
 
 (defn pack
   "Build executable diffusion nodes.
@@ -71,12 +72,14 @@
   - `:clip-tokenizer` OpenAI CLIP BPE tokenizer function
   - `:clip-spec` checkpoint transformer graph for CLIP encoding
   - `:alphas-cumprod` schedule vector, or a resolver function
+  - `:checkpoint-dtype-policy` `:f32` (default) or `:native`; native retains
+    checkpoint F16/BF16 weights in physical two-byte storage
 
   The MODEL/CLIP/VAE maps share one lazy SafeTensorFile. The host owns its
   lifecycle and closes `:comfyui/checkpoint` when the workflow/model unloads."
   [{:keys [backend resolve-checkpoint model-spec vae-spec clip-spec alphas-cumprod
-           output-directory clip-tokenizer]
-    :or {resolve-checkpoint identity}}]
+           output-directory clip-tokenizer checkpoint-dtype-policy]
+    :or {resolve-checkpoint identity checkpoint-dtype-policy :f32}}]
   [{:type "CheckpointLoaderSimple"
     :category "loaders"
     :inputs {:ckpt_name {:type "STRING"}}
@@ -87,7 +90,8 @@
           (let [checkpoint (safe/open-file (resolve-checkpoint ckpt_name))
                 model-component (component checkpoint :model
                                            ["model.diffusion_model."
-                                            "diffusion_model." "unet."])
+                                            "diffusion_model." "unet."]
+                                           checkpoint-dtype-policy)
                 architecture-info (architecture/infer checkpoint)
                 configured-spec (if (fn? model-spec)
                                   (model-spec ckpt_name checkpoint) model-spec)
@@ -118,7 +122,8 @@
                                model-component backend effective-spec))
                   alphas (assoc :comfyui/alphas-cumprod (vec alphas)))
                 vae-component (component checkpoint :vae
-                                         ["first_stage_model." "vae."])
+                                         ["first_stage_model." "vae."]
+                                         checkpoint-dtype-policy)
                 executable-vae
                 (cond-> vae-component
                   decoder-spec
@@ -129,7 +134,8 @@
                 clip-component (component checkpoint :clip
                                           ["cond_stage_model." "text_encoder."
                                            "text_encoder_2." "conditioner.embedders."
-                                           "clip."])
+                                           "clip."]
+                                          checkpoint-dtype-policy)
                 executable-clip
                 (cond-> clip-component
                   resolved-clip-spec

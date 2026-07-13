@@ -18,19 +18,20 @@
   (let [header (.getBytes
                 (json/write-str
                  {"model.diffusion_model.input.weight"
-                  {"dtype" "F32" "shape" [1] "data_offsets" [0 4]}
+                  {"dtype" "F16" "shape" [1] "data_offsets" [0 2]}
                   "cond_stage_model.token.weight"
-                  {"dtype" "F32" "shape" [1] "data_offsets" [4 8]}
+                  {"dtype" "F32" "shape" [1] "data_offsets" [2 6]}
                   "first_stage_model.decoder.weight"
-                  {"dtype" "F32" "shape" [1] "data_offsets" [8 12]}})
+                  {"dtype" "F32" "shape" [1] "data_offsets" [6 10]}})
                 "UTF-8")
-        buffer (doto (ByteBuffer/allocate (+ 8 (alength header) 12))
+        buffer (doto (ByteBuffer/allocate (+ 8 (alength header) 10))
                  (.order ByteOrder/LITTLE_ENDIAN))
         path (Files/createTempFile "comfyui-runtime-" ".safetensors"
                                    (make-array FileAttribute 0))]
     (.putLong buffer (long (alength header)))
     (.put buffer header)
-    (doseq [x [1.0 2.0 3.0]] (.putFloat buffer (float x)))
+    (.putShort buffer (unchecked-short 0x3c00))
+    (doseq [x [2.0 3.0]] (.putFloat buffer (float x)))
     (Files/write path (.array buffer) (make-array OpenOption 0))
     path))
 
@@ -63,7 +64,8 @@
 (deftest executable-pack-loads-checkpoint-and-allocates-real-latent
   (let [path (checkpoint-fixture)
         registry (node/registry (runtime/pack {:backend backend
-                                               :resolve-checkpoint (constantly path)}))
+                                               :resolve-checkpoint (constantly path)
+                                               :checkpoint-dtype-policy :native}))
         workflow {"load" {:class_type "CheckpointLoaderSimple"
                            :inputs {:ckpt_name "fixture.safetensors"}}
                   "latent" {:class_type "EmptyLatentImage"
@@ -81,9 +83,10 @@
                 ["cond_stage_model.token.weight"]
                 ["first_stage_model.decoder.weight"]]
                (mapv :comfyui/tensor-names [model clip vae])))
-        (is (= [1.0]
-               (arr/->vec ((:comfyui/read-tensor model)
-                           backend "model.diffusion_model.input.weight"))))
+        (let [weight ((:comfyui/read-tensor model)
+                      backend "model.diffusion_model.input.weight")]
+          (is (= :f16 (:dtype weight)))
+          (is (= [1.0] (arr/->vec weight))))
         (safe/close! checkpoint))
       (finally
         (Files/deleteIfExists path)))))

@@ -124,7 +124,9 @@ execution while retaining the upstream class names and wire types:
 - `CheckpointLoaderSimple` opens and validates a real safetensors file, keeps
   tensor payloads lazy on disk, partitions MODEL/CLIP/VAE tensor catalogs by
   checkpoint prefixes, and decodes requested F16, BF16, F32, F64, signed, or
-  unsigned tensors into `num` NDArrays.
+  unsigned tensors into `num` NDArrays. `:checkpoint-dtype-policy :native`
+  retains F16/BF16 checkpoint weights as physical two-byte storage instead of
+  permanently expanding them to F32; the compatibility default is `:f32`.
 - `EmptyLatentImage` allocates `[batch,4,height/8,width/8]` NCHW latent storage.
 - `DDIMStep` performs the real epsilon-prediction transition, including the
   deterministic path and eta/noise variance path, inside `comfyui.exec`.
@@ -147,8 +149,15 @@ execution while retaining the upstream class names and wire types:
   (node/registry
    (diffusion-runtime/pack
     {:backend (cpu/cpu-backend)
-     :resolve-checkpoint #(str "/models/checkpoints/" %)})))
+     :resolve-checkpoint #(str "/models/checkpoints/" %)
+     :checkpoint-dtype-policy :native})))
 ```
+
+Native storage removes the persistent 2x expansion of half-precision weights,
+but decoding currently still uses a temporary JVM value vector and is not a
+zero-copy memory map. Model execution must also use dtype-compatible inputs;
+automatic mixed-precision graph casting is tracked separately and is not
+implied by selecting native checkpoint storage.
 
 `comfyui.diffusion.model` lowers a plain-data model spec into checkpoint-backed
 num operations. Its current vocabulary executes convolution/downsampling,
