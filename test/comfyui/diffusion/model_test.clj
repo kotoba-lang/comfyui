@@ -12,6 +12,25 @@
             (if (= row column) scale 0.0)))
         (range (* rows columns))))
 
+(deftest f16-checkpoint-weights-autocast-the-internal-graph
+  (let [arrays {"in.w" (arr/from-vec backend [0.5] [1 1 1 1] :f16)
+                "in.b" (arr/from-vec backend [0.25] [1] :f16)
+                "out.w" (arr/from-vec backend [2.0] [1 1 1 1] :f16)
+                "out.b" (arr/from-vec backend [-0.1] [1] :f16)}
+        component {:comfyui/read-tensor (fn [_ name] (get arrays name))}
+        spec {:layers [{:op :conv2d :weight "in.w" :bias "in.b"}
+                       {:op :silu}
+                       {:op :conv2d :weight "out.w" :bias "out.b"}]}
+        denoise (model/compile-denoiser component backend spec)
+        sample (arr/from-vec backend [1.0 -0.5 0.25 2.0] [1 1 2 2])
+        output (denoise sample 0 nil)
+        cache @(-> denoise meta :comfyui/tensor-cache)]
+    (is (= :f32 (:dtype output)) "the public denoiser preserves latent dtype")
+    (is (= [1 1 2 2] (:shape output)))
+    (is (every? #(Double/isFinite %) (arr/->vec output)))
+    (is (= #{:f16} (set (map :dtype (vals cache)))))
+    (is (= 4 (count cache)))))
+
 (deftest learned-cross-attention-and-timestep-embedding-execute
   (let [arrays
         {"q.w" (arr/from-vec backend (identity-values 4 4 1.0) [4 4])

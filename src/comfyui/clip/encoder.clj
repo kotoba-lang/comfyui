@@ -7,9 +7,20 @@
 (defn- fail [message data]
   (throw (ex-info (str "comfyui.clip.encoder: " message) data)))
 
+(defn- dtype [tensor] (or (:dtype tensor) :f32))
+
+(defn- cast-to [tensor target-dtype]
+  (if (= (dtype tensor) target-dtype) tensor (arr/cast tensor target-dtype)))
+
+(defn- softmax [tensor]
+  (cast-to (t/softmax (cast-to tensor :f32)) (dtype tensor)))
+
 (defn- linear [x weight bias]
-  (let [output (t/matmul x (t/transpose weight))]
-    (if bias (t/add output bias) output)))
+  (let [target-dtype (dtype weight)
+        output (cast-to (t/matmul (cast-to x target-dtype)
+                                  (t/transpose weight))
+                        target-dtype)]
+    (if bias (t/add output (cast-to bias target-dtype)) output)))
 
 (defn- layer-norm [x weight bias eps]
   (let [shape (:shape x) hidden (long (last shape))
@@ -34,14 +45,15 @@
           (aset out (+ base i)
                 (+ (* (- (aget xs (+ base i)) mean) inv-std (aget ws i))
                    (aget bs i))))))
-    (arr/from-vec (:backend x) (vec out) shape)))
+    (arr/from-vec (:backend x) (vec out) shape (dtype x))))
 
 (defn- quick-gelu [x]
   (arr/from-vec (:backend x)
                 (mapv (fn [value]
                         (* value (/ 1.0 (+ 1.0 (Math/exp (* -1.702 value))))))
                       (arr/->vec x))
-                (:shape x)))
+                (:shape x)
+                (dtype x)))
 
 (defn- embeddings [backend input-ids token-weight position-weight]
   (let [[vocab hidden] (:shape token-weight)
@@ -59,7 +71,8 @@
        (vec (for [index (range length) channel (range hidden)]
               (+ (aget tokens (+ (* (nth input-ids index) hidden) channel))
                  (aget position (+ (* index hidden) channel)))))
-       [1 length hidden]))))
+       [1 length hidden]
+       (dtype token-weight)))))
 
 (defn- slice-first-axis [tensor start length]
   (let [[rows columns] (:shape tensor)]
@@ -69,12 +82,14 @@
     (arr/from-vec (:backend tensor)
                   (subvec (vec (arr/->vec tensor)) (* start columns)
                           (* (+ start length) columns))
-                  [length columns])))
+                  [length columns]
+                  (dtype tensor))))
 
 (defn- slice-vector [tensor start length]
   (arr/from-vec (:backend tensor)
                 (subvec (vec (arr/->vec tensor)) start (+ start length))
-                [length]))
+                [length]
+                (dtype tensor)))
 
 (defn- self-attention [x tensor! layer heads]
   (let [[batch length hidden] (:shape x)
@@ -96,14 +111,16 @@
         q (split (project "query"))
         k (split (project "key"))
         v (split (project "value"))
-        scores (nm/scal! (/ 1.0 (Math/sqrt head-dim))
-                         (t/matmul q (t/transpose k [0 1 3 2])))
+        scores (cast-to (nm/scal! (/ 1.0 (Math/sqrt head-dim))
+                                  (t/matmul q (t/transpose k [0 1 3 2])))
+                        (dtype x))
         causal (arr/from-vec (:backend x)
                              (vec (for [_batch (range batch) _head (range heads)
                                         row (range length) column (range length)]
                                     (if (<= column row) 0.0 -1.0e9)))
-                             [batch heads length length])
-        probabilities (t/softmax (t/add scores causal))
+                             [batch heads length length]
+                             (dtype x))
+        probabilities (softmax (t/add scores causal))
         attended (t/matmul probabilities v)
         merged (t/reshape (t/transpose attended [0 2 1 3])
                           [batch length hidden])]
@@ -160,9 +177,11 @@
               pooled-base (arr/from-vec backend
                                           (subvec values (* eos-index hidden-size)
                                                   (* (inc eos-index) hidden-size))
-                                          [1 hidden-size])
+                                          [1 hidden-size]
+                                          (dtype output))
               pooled (if text-projection
-                       (t/matmul pooled-base (tensor! text-projection))
+                       (cast-to (t/matmul pooled-base (tensor! text-projection))
+                                (dtype pooled-base))
                        pooled-base)]
           (assoc tokenized :tensor output :pooled pooled)))
       {:comfyui/clip-spec spec :comfyui/tensor-cache cache})))
@@ -185,7 +204,8 @@
             (fail "dual encoder batch/token dimensions differ"
                   {:left (:shape left-tensor) :right (:shape right-tensor)}))
           (assoc tokenized
-                 :tensor (t/cat [left-tensor right-tensor] 2)
+                 :tensor (t/cat [left-tensor
+                                 (cast-to right-tensor (dtype left-tensor))] 2)
                  :pooled (:pooled right)
                  :clip-l left
                  :clip-g right)))

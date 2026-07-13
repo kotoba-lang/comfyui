@@ -155,9 +155,11 @@ execution while retaining the upstream class names and wire types:
 
 Native storage removes the persistent 2x expansion of half-precision weights,
 but decoding currently still uses a temporary JVM value vector and is not a
-zero-copy memory map. Model execution must also use dtype-compatible inputs;
-automatic mixed-precision graph casting is tracked separately and is not
-implied by selecting native checkpoint storage.
+zero-copy memory map. Compiled UNet/VAE and CLIP graphs autocast their internal
+activations, normalization results, attention masks, and embeddings to the
+checkpoint weight dtype; denoisers cast their result back to the caller's
+latent dtype so the sampler boundary remains stable. The typed graph path is
+CPU-tested; a complete production checkpoint on Metal remains to be verified.
 
 `comfyui.diffusion.model` lowers a plain-data model spec into checkpoint-backed
 num operations. Its current vocabulary executes convolution/downsampling,

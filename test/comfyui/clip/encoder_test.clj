@@ -75,7 +75,7 @@
   (let [identity2 (matrix 2 2 #(if (= %1 %2) 1.0 0.0))
         zero2 (vector* [0 0])
         one2 (vector* [1 1])
-        arrays {"token" (matrix 6 2 #(* 0.1 (+ 1 %1 %2)))
+        arrays-f32 {"token" (matrix 6 2 #(* 0.1 (+ 1 %1 %2)))
                 "position" (matrix 3 2 #(* 0.01 (+ %1 %2)))
                 "n1.w" one2 "n1.b" zero2
                 "in.w" (matrix 6 2 #(if (= (mod %1 2) %2) 1.0 0.0))
@@ -87,6 +87,8 @@
                 "fc2.w" (matrix 2 4 #(if (= (mod %2 2) %1) 0.25 0.0))
                 "fc2.b" zero2 "final.w" one2 "final.b" zero2
                 "projection" identity2}
+        arrays (into {} (map (fn [[name tensor]] [name (arr/cast tensor :f16)]))
+                     arrays-f32)
         component {:comfyui/read-tensor (fn [_ name] (get arrays name))}
         layer {:norm1-weight "n1.w" :norm1-bias "n1.b"
                :in-proj-weight "in.w" :in-proj-bias "in.b"
@@ -103,4 +105,6 @@
         result (encode {:input-ids [1 2 0] :attention-mask [1 1 0]})]
     (is (= [1 3 2] (:shape (:tensor result))))
     (is (= [1 2] (:shape (:pooled result))))
+    (is (= :f16 (:dtype (:tensor result))))
+    (is (= :f16 (:dtype (:pooled result))))
     (is (every? #(Double/isFinite %) (arr/->vec (:tensor result))))))
