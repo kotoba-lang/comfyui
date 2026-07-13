@@ -94,41 +94,18 @@
     (t/add value (t/reshape projected [1 channels 1 1]))))
 
 (defn- take-channels [value channels]
-  (let [[batch input-channels height width :as shape] (:shape value)]
+  (let [[_batch input-channels _height _width :as shape] (:shape value)]
     (when-not (and (= 4 (count shape)) (pos-int? channels)
                    (<= channels input-channels))
       (fail "take-channels requires NCHW and a valid channel count"
             {:shape shape :channels channels}))
-    (let [plane (* height width)
-          source (arr/->vec value)
-          output (vec
-                  (mapcat (fn [n]
-                            (let [start (* n input-channels plane)]
-                              (subvec source start (+ start (* channels plane)))))
-                          (range batch)))]
-      (arr/from-vec (:backend value) output [batch channels height width]
-                    (:dtype value)))))
+    (t/slice-axis value 1 0 channels)))
 
 (defn- pad-right-bottom [value]
-  (let [[batch channels height width :as shape] (:shape value)]
+  (let [shape (:shape value)]
     (when-not (= 4 (count shape))
       (fail "pad-right-bottom requires NCHW" {:shape shape}))
-    (let [source (arr/->vec value)
-          padded-width (inc width)
-          output (vec
-                  (for [n (range batch)
-                        c (range channels)
-                        y (range (inc height))
-                        x (range padded-width)]
-                    (if (or (= y height) (= x width))
-                      0.0
-                      (nth source (+ (* n channels height width)
-                                     (* c height width)
-                                     (* y width)
-                                     x)))))]
-      (arr/from-vec (:backend value) output
-                    [batch channels (inc height) padded-width]
-                    (:dtype value)))))
+    (t/pad-right-bottom-nchw value)))
 
 (defn- resblock [value embedding tensor! layer]
   (let [groups (or (:groups layer) 32)
@@ -418,10 +395,7 @@
                    :silu (assoc state :value (t/silu value))
 
                    :scale
-                   (assoc state :value
-                          (nm/scal! (double (:factor layer))
-                                    (arr/from-vec (:backend value)
-                                                  (arr/->vec value) (:shape value))))
+                   (assoc state :value (t/scale value (:factor layer)))
 
                    :save
                    (assoc-in state [:saved (:name layer)] value)

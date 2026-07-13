@@ -155,7 +155,9 @@ execution while retaining the upstream class names and wire types:
   the model scaling factor. Its output connects directly to partial-denoise
   `KSampler`; `VAEDecode` performs the inverse latent-to-image path. Encoder
   downsampling reproduces Diffusers' asymmetric right/bottom zero padding
-  before its stride-2 convolution.
+  before its stride-2 convolution. On an `ITensorBackend`, padding and posterior
+  channel selection dispatch device-native kernels with no intermediate readback;
+  `vae-encoder-metal-verify` checks the graph against the CPU oracle on Apple Metal.
 
 ```clojure
 (require '[comfyui.node :as node]
