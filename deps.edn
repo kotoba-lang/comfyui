@@ -46,6 +46,14 @@
   {:extra-paths ["test"]
    :jvm-opts ["-Xms128m" "-Xmx1g"]
    :main-opts ["-m" "comfyui.real-diffusers-unet-verify"]}
+  :real-diffusers-vae-verify
+  {:extra-paths ["test"]
+   :jvm-opts ["-Xms128m" "-Xmx1g"]
+   :main-opts ["-m" "comfyui.real-diffusers-vae-verify"]}
+  :real-diffusers-pipeline-verify
+  {:extra-paths ["test"]
+   :jvm-opts ["-Xms128m" "-Xmx2g"]
+   :main-opts ["-m" "comfyui.real-diffusers-pipeline-verify"]}
   ;; comfyui.diffusion.model / comfyui.clip.encoder were JVM-only .clj files
   ;; despite touching no JVM I/O (tensors are injected via a component's
   ;; :comfyui/read-tensor fn); the only JVM-only surface was bare Math/foo

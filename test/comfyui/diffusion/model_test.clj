@@ -12,6 +12,32 @@
             (if (= row column) scale 0.0)))
         (range (* rows columns))))
 
+(deftest vae-spatial-self-attention-executes-and-caches
+  (let [identity (arr/from-vec backend (identity-values 2 2 1.0) [2 2])
+        zeros (arr/from-vec backend [0 0] [2])
+        arrays {"norm.w" (arr/from-vec backend [1 1] [2]) "norm.b" zeros
+                "q.w" identity "q.b" zeros "k.w" identity "k.b" zeros
+                "v.w" identity "v.b" zeros "out.w" identity "out.b" zeros}
+        reads (atom 0)
+        component {:comfyui/read-tensor
+                   (fn [_ name] (swap! reads inc) (get arrays name))}
+        decoder (model/compile-decoder
+                 component backend
+                 {:layers [{:op :vae-attention :groups 1
+                            :norm-weight "norm.w" :norm-bias "norm.b"
+                            :query-weight "q.w" :query-bias "q.b"
+                            :key-weight "k.w" :key-bias "k.b"
+                            :value-weight "v.w" :value-bias "v.b"
+                            :output-weight "out.w" :output-bias "out.b"}]})
+        input (arr/from-vec backend [0.2 -0.1 0.7 0.3] [1 2 1 2])
+        output (decoder input)]
+    (is (= (:shape input) (:shape output)))
+    (is (every? #(Double/isFinite (double %)) (arr/->vec output)))
+    (is (not= (arr/->vec input) (arr/->vec output)))
+    (is (= 10 @reads))
+    (decoder input)
+    (is (= 10 @reads))))
+
 (deftest learned-cross-attention-and-timestep-embedding-execute
   (let [arrays
         {"q.w" (arr/from-vec backend (identity-values 4 4 1.0) [4 4])

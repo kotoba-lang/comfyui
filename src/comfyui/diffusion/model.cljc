@@ -15,7 +15,7 @@
   #{:conv2d :groupnorm :silu :save :add-saved :cat-saved :upsample
     :scale :add-conditioning :cross-attention :timestep-bias :timestep-embedding
     :timestep-vector :sdxl-label-embedding :add-embedding :resblock
-    :spatial-transformer})
+    :spatial-transformer :vae-attention})
 
 (defn- fail [message data]
   (throw (ex-info (str "comfyui.diffusion.model: " message) data)))
@@ -31,28 +31,36 @@
   (let [output (t/matmul x (t/transpose weight))]
     (if bias (t/add output bias) output)))
 
-(defn- sinusoidal-vector [backend values embedding-dim]
+(defn- sinusoidal-vector
+  ([backend values embedding-dim]
+   (sinusoidal-vector backend values embedding-dim false 1.0))
+  ([backend values embedding-dim flip-sin-to-cos?]
+   (sinusoidal-vector backend values embedding-dim flip-sin-to-cos? 1.0))
+  ([backend values embedding-dim flip-sin-to-cos? frequency-shift]
   (when-not (and (even? embedding-dim) (>= embedding-dim 2))
     (fail "sinusoidal embedding dimension must be positive and even"
           {:dimension embedding-dim}))
   (let [half (quot embedding-dim 2)
-        denominator (max 1 (dec half))
+        denominator (max 1.0 (- half (double frequency-shift)))
         frequencies (mapv #(Math/exp (* -1.0 (Math/log 10000.0)
                                      (/ % denominator)))
                           (range half))]
     (arr/from-vec
      backend
      (vec (mapcat (fn [value]
-                    (let [angles (mapv #(* (double value) %) frequencies)]
-                      (concat (mapv #(Math/sin %) angles)
-                              (mapv #(Math/cos %) angles))))
+                    (let [angles (mapv #(* (double value) %) frequencies)
+                          sin (mapv #(Math/sin %) angles)
+                          cos (mapv #(Math/cos %) angles)]
+                      (if flip-sin-to-cos? (concat cos sin) (concat sin cos))))
                   values))
-     [1 (* (count values) embedding-dim)])))
+     [1 (* (count values) embedding-dim)]))))
 
 (defn- timestep-vector [value timestep tensor! layer]
   (let [first-weight (tensor! (:first-weight layer))
         input-dim (second (:shape first-weight))
-        input (sinusoidal-vector (:backend value) [timestep] input-dim)]
+        input (sinusoidal-vector (:backend value) [timestep] input-dim
+                                 (boolean (:flip-sin-to-cos? layer))
+                                 (double (or (:frequency-shift layer) 1.0)))]
     (linear (t/silu (linear input first-weight (tensor! (:first-bias layer))))
             (tensor! (:second-weight layer)) (tensor! (:second-bias layer)))))
 
@@ -276,6 +284,34 @@
                           [0 3 1 2])]
     (if (false? (:residual layer)) nchw (nm/add value nchw))))
 
+(defn- vae-attention [value tensor! layer]
+  (let [[batch channels height width :as shape] (:shape value)
+        normalized (t/group-norm-nchw
+                    value (or (:groups layer) 32)
+                    (tensor! (:norm-weight layer))
+                    (tensor! (:norm-bias layer)) (or (:eps layer) 1.0e-6))
+        sequence-length (* height width)
+        sequence (t/reshape (t/transpose normalized [0 2 3 1])
+                            [batch sequence-length channels])
+        projection (fn [key]
+                     (linear sequence
+                             (tensor! (get layer (keyword (str key "-weight"))))
+                             (tensor! (get layer (keyword (str key "-bias"))))))
+        query (projection "query")
+        key (projection "key")
+        value-projection (projection "value")
+        scores (nm/scal! (/ 1.0 (Math/sqrt channels))
+                         (t/matmul query (t/transpose key [0 2 1])))
+        attended (t/matmul (t/softmax scores) value-projection)
+        projected (linear attended (tensor! (:output-weight layer))
+                          (tensor! (:output-bias layer)))
+        output (t/transpose (t/reshape projected [batch height width channels])
+                            [0 3 1 2])]
+    (when-not (= shape (:shape output))
+      (fail "VAE attention changed tensor shape"
+            {:input shape :output (:shape output)}))
+    (nm/add value output)))
+
 (defn- timestep-embedding [value timestep tensor! layer]
   (let [first-weight (tensor! (:first-weight layer))
         first-bias (tensor! (:first-bias layer))
@@ -413,6 +449,9 @@
                    :spatial-transformer
                    (assoc state :value
                           (spatial-transformer value conditioning tensor! layer))
+
+                   :vae-attention
+                   (assoc state :value (vae-attention value tensor! layer))
 
                    :timestep-bias
                    (let [bias (* (double (or (:scale layer) 1.0)) (double timestep))

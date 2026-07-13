@@ -61,6 +61,10 @@
         step1 (:previous-sample (scheduler/ddim-step sample guided 0.5 0.7))
         expected (:previous-sample (scheduler/ddim-step step1 guided 0.7 1.0))]
     (is (= [2 0] (scheduler/select-timesteps 3 2)))
+    (is (= [501 1] (scheduler/select-timesteps
+                    1000 2 {:spacing "leading" :steps-offset 1})))
+    (is (= [999 499] (scheduler/select-timesteps
+                      1000 2 {:spacing "trailing"})))
     (is (= [2 1] (mapv :timestep @events)))
     (is (approx? (first (arr/->vec expected))
                  (first (arr/->vec (:sample result)))))))

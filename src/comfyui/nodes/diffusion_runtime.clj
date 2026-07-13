@@ -9,6 +9,7 @@
             [comfyui.diffusion.scheduler :as scheduler]
             [comfyui.safetensors :as safe]
             [num.array :as arr]
+            [num.core :as nm]
             [num.tensor :as t])
   (:import [java.awt.image BufferedImage]
            [java.nio.file Files Paths]
@@ -59,6 +60,77 @@
                                               {:component kind :tensor tensor-name})))
                             (safe/read-tensor checkpoint backend tensor-name))}))
 
+(defn- config-value [config key]
+  (or (get config key) (get config (keyword key))))
+
+(defn- diffusers-alphas [config]
+  (let [steps (long (config-value config "num_train_timesteps"))
+        start (double (config-value config "beta_start"))
+        end (double (config-value config "beta_end"))
+        betas (case (config-value config "beta_schedule")
+                "scaled_linear" (scheduler/scaled-linear-betas steps start end)
+                "linear" (scheduler/linear-betas steps start end)
+                (throw (ex-info "unsupported Diffusers beta schedule"
+                                {:config config})))]
+    (when-not (= "epsilon" (config-value config "prediction_type"))
+      (throw (ex-info "only epsilon-prediction Diffusers pipelines are executable"
+                      {:prediction-type (config-value config "prediction_type")})))
+    (scheduler/alphas-cumprod betas)))
+
+(defn- diffusers-pipeline-loader [backend resolve-pipeline]
+  {:type "DiffusersPipelineLoader"
+   :category "loaders"
+   :inputs {:pipeline_name {:type "STRING"}}
+   :outputs [{:name "MODEL" :type "MODEL"}
+             {:name "CLIP" :type "CLIP"}
+             {:name "VAE" :type "VAE"}]
+   :fn
+   (fn [{:keys [pipeline_name]}]
+     (when-not (fn? resolve-pipeline)
+       (throw (ex-info "DiffusersPipelineLoader requires :resolve-diffusers-pipeline" {})))
+     (let [{:keys [unet text-encoder vae unet-config text-config vae-config
+                   scheduler-config]} (resolve-pipeline pipeline_name)
+           opened (atom [])
+           open! (fn [path]
+                   (let [checkpoint (safe/open-file path)]
+                     (swap! opened conj checkpoint)
+                     checkpoint))]
+       (try
+         (let [unet-checkpoint (open! unet)
+               text-checkpoint (open! text-encoder)
+               vae-checkpoint (open! vae)
+               model-component (component unet-checkpoint :model [""])
+               clip-component (component text-checkpoint :clip [""])
+               vae-component (component vae-checkpoint :vae [""])
+               model-spec (architecture/infer-diffusers-unet-spec
+                           unet-checkpoint unet-config)
+               clip-spec (architecture/infer-diffusers-clip-spec
+                          text-checkpoint text-config)
+               vae-spec (architecture/infer-diffusers-vae-spec
+                         vae-checkpoint vae-config)]
+           (when-not (and model-spec clip-spec vae-spec scheduler-config)
+             (throw (ex-info "incomplete Diffusers pipeline"
+                             {:model-spec? (boolean model-spec)
+                              :clip-spec? (boolean clip-spec)
+                              :vae-spec? (boolean vae-spec)
+                              :scheduler-config? (boolean scheduler-config)})))
+           [(assoc model-component
+                   :comfyui/architecture {:family :diffusers-stable-diffusion}
+                   :comfyui/model-spec model-spec
+                   :comfyui/alphas-cumprod (vec (diffusers-alphas scheduler-config))
+                   :comfyui/scheduler-config scheduler-config
+                   :comfyui/denoise
+                   (diffusion-model/compile-denoiser model-component backend model-spec))
+            (assoc clip-component :comfyui/clip-spec clip-spec
+                   :comfyui/encode
+                   (clip-encoder/compile-encoder clip-component backend clip-spec))
+            (assoc vae-component :comfyui/model-spec vae-spec
+                   :comfyui/decode
+                   (diffusion-model/compile-decoder vae-component backend vae-spec))])
+         (catch Throwable error
+           (doseq [checkpoint @opened] (safe/close! checkpoint))
+           (throw error)))))})
+
 (defn pack
   "Build executable diffusion nodes.
 
@@ -67,16 +139,20 @@
   - `:resolve-checkpoint` maps ComfyUI's ckpt_name to a filesystem path
   - `:model-spec` graph map, or `(fn [ckpt-name checkpoint] graph-map)`
   - `:vae-spec` decoder graph map, or resolver function
+  - `:diffusers-vae-config` AutoencoderKL config map, or resolver function
+  - `:resolve-diffusers-pipeline` resolves a pipeline name to separate UNet,
+    text encoder, and VAE paths plus their configs and scheduler config
   - `:output-directory` destination for executable SaveImage PNG files
   - `:clip-tokenizer` OpenAI CLIP BPE tokenizer function
   - `:clip-spec` checkpoint transformer graph for CLIP encoding
   - `:alphas-cumprod` schedule vector, or a resolver function
 
-  The MODEL/CLIP/VAE maps share one lazy SafeTensorFile. The host owns its
-  lifecycle and closes `:comfyui/checkpoint` when the workflow/model unloads."
+  CheckpointLoaderSimple shares one SafeTensorFile across outputs; the
+  Diffusers loader owns one file per component. The host closes each distinct
+  `:comfyui/checkpoint` when the workflow/model unloads."
   [{:keys [backend resolve-checkpoint model-spec diffusers-config
-           vae-spec clip-spec alphas-cumprod
-           output-directory clip-tokenizer]
+           vae-spec diffusers-vae-config clip-spec alphas-cumprod
+           resolve-diffusers-pipeline output-directory clip-tokenizer]
     :or {resolve-checkpoint identity}}]
   [{:type "CheckpointLoaderSimple"
     :category "loaders"
@@ -116,8 +192,16 @@
                                     alphas-cumprod)
                 alphas (or configured-alphas
                            (architecture/default-alphas-cumprod architecture-info))
-                decoder-spec (if (fn? vae-spec)
-                               (vae-spec ckpt_name checkpoint) vae-spec)
+                resolved-diffusers-vae-config
+                (if (fn? diffusers-vae-config)
+                  (diffusers-vae-config ckpt_name checkpoint)
+                  diffusers-vae-config)
+                configured-decoder-spec (if (fn? vae-spec)
+                                          (vae-spec ckpt_name checkpoint) vae-spec)
+                decoder-spec (or configured-decoder-spec
+                                 (when resolved-diffusers-vae-config
+                                   (architecture/infer-diffusers-vae-spec
+                                    checkpoint resolved-diffusers-vae-config)))
                 executable-model
                 (cond-> (assoc model-component :comfyui/architecture architecture-info)
                   effective-spec (assoc :comfyui/model-spec effective-spec
@@ -126,7 +210,8 @@
                                model-component backend effective-spec))
                   alphas (assoc :comfyui/alphas-cumprod (vec alphas)))
                 vae-component (component checkpoint :vae
-                                         ["first_stage_model." "vae."])
+                                         (cond-> ["first_stage_model." "vae."]
+                                           resolved-diffusers-vae-config (conj "")))
                 executable-vae
                 (cond-> vae-component
                   decoder-spec
@@ -150,6 +235,7 @@
             [executable-model
              executable-clip
              executable-vae]))}
+   (diffusers-pipeline-loader backend resolve-diffusers-pipeline)
    {:type "CLIPTextEncode"
     :category "conditioning"
     :inputs {:clip {:type "CLIP"}
@@ -276,6 +362,7 @@
                             {:sampler-name sampler_name :scheduler scheduler :denoise denoise})))
           (let [denoise-fn (:comfyui/denoise model)
                 alphas (:comfyui/alphas-cumprod model)
+                scheduler-config (:comfyui/scheduler-config model)
                 sample (if (and (map? latent_image) (contains? latent_image :samples))
                          (:samples latent_image)
                          latent_image)
@@ -287,12 +374,32 @@
                            (arr/from-vec (:backend sample)
                                          (repeatedly (arr/nelems shape) #(.nextGaussian random))
                                          shape))
+                timesteps (scheduler/select-timesteps
+                           (count alphas) steps
+                           (if scheduler-config
+                             {:spacing (or (config-value scheduler-config
+                                                         "timestep_spacing") "linspace")
+                              :steps-offset (long (or (config-value scheduler-config
+                                                                   "steps_offset") 0))}
+                             {}))
+                initial-timestep (first timesteps)
+                initial-noise (noise-fn (:shape sample) initial-timestep)
+                initial-sample
+                (case sampler_name
+                  "ddim" (t/add sample initial-noise)
+                  (let [sigma (scheduler/alpha->sigma
+                               (double (nth alphas initial-timestep)))]
+                    (t/add sample (nm/scal! sigma initial-noise))))
                 sampler-args
-                {:sample sample
+                {:sample initial-sample
                  :alphas alphas
-                 :timesteps (scheduler/select-timesteps (count alphas) steps)
+                 :timesteps timesteps
                  :denoise-fn denoise-fn
                  :positive positive :negative negative :cfg cfg
+                 :final-alpha (if (and scheduler-config
+                                       (false? (config-value scheduler-config
+                                                             "set_alpha_to_one")))
+                                (first alphas) 1.0)
                  :eta 0.0 :noise-fn noise-fn}
                 result (case sampler_name
                          "ddim" (scheduler/ddim-sample sampler-args)

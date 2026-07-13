@@ -229,11 +229,55 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-This is not yet a verified production SD/SDXL render: the complete automatic
-UNet mapping still needs full-size validation against installed upstream
-checkpoints, and additional
-ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
-precision, and an installed real
+Diffusers `AutoencoderKL` decoder files are inferred directly from their
+`config.json`: post-quant projection, mid-block ResNets and spatial self-
+attention, every up block, final normalization, and RGB convolution execute
+without renaming tensors. The real-checkpoint verifier decodes the published
+tiny Stable Diffusion VAE while proving that all 70 decoder tensors are loaded
+and no encoder tensor is touched:
+
+```sh
+clojure -M:real-diffusers-vae-verify vae.safetensors vae/config.json
+```
+
+`DiffusersPipelineLoader` loads the upstream directory layout without first
+repacking it into a monolithic checkpoint: standalone UNet, Transformers
+`CLIPTextModel`, VAE, and scheduler configs are validated and compiled as one
+ComfyUI-compatible MODEL/CLIP/VAE triple. Configured small CLIP head counts and
+Hugging Face EOS padding are preserved. `KSampler` now creates reproducible
+seeded initial noise (DDIM alpha-space or Euler sigma-space) instead of treating
+`EmptyLatentImage`'s zeros as the starting noisy latent. The full real-file
+verifier executes prompt tokenization, positive/negative CLIP conditioning,
+CFG UNet sampling, VAE decoding, and PNG output:
+
+```sh
+clojure -M:real-diffusers-pipeline-verify \
+  unet/model.safetensors unet/config.json \
+  text_encoder/model.safetensors text_encoder/config.json \
+  vae/model.safetensors vae/config.json scheduler/scheduler_config.json \
+  tokenizer/vocab.json tokenizer/merges.txt
+```
+
+The real verifiers also pin numerical reference values produced from the same
+inputs by PyTorch 2.13, Diffusers 0.39, and Transformers 5.13. CLIP's first
+hidden-state values agree within `1e-5`; VAE pixels agree within `1e-4` with a
+total image-sum error below `1e-2`; UNet epsilon values agree within `1e-4`.
+UNet timestep embeddings preserve Diffusers' `flip_sin_to_cos` and `freq_shift`
+configuration. Multi-step sampling likewise preserves `linspace`, `leading`,
+or `trailing` timestep spacing, `steps_offset`, and `set_alpha_to_one` rather
+than silently substituting a generic schedule.
+
+The pipeline verifier additionally runs a fixed-noise, two-step `[501, 1]`
+DDIM trajectory through positive/negative CFG and the VAE. Against the same
+PyTorch/Diffusers trajectory, guided epsilon sums agree within `1e-4`, final
+latent and image sums within `1e-3`, and sampled output pixels within `1e-4`.
+Full-denoise DDIM begins from the seeded noise tensor (`init_noise_sigma=1`),
+while Euler retains sigma-scaled initialization.
+
+This is not yet a verified production SD/SDXL render: the automatic graph
+mapping still needs full-size validation and pixel/numerical comparison against
+upstream Diffusers, and additional
+ancestral/DPM sampler families, additional VAE variants, mixed precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 

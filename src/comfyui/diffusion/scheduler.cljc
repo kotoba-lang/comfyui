@@ -96,17 +96,29 @@
   (t/add unconditional (scale (t/sub conditional unconditional) cfg)))
 
 (defn select-timesteps
-  "Select `steps` evenly-spaced training timestep indices, descending."
-  [training-steps steps]
-  (when-not (and (pos-int? training-steps) (pos-int? steps) (<= steps training-steps))
-    (throw (ex-info "invalid inference timestep count"
-                    {:training-steps training-steps :steps steps})))
-  (if (= steps 1)
-    [(dec training-steps)]
-    (mapv (fn [i]
-            (long (Math/round (* (- 1.0 (/ i (double (dec steps))))
-                                 (dec training-steps)))))
-          (range steps))))
+  "Select Diffusers-compatible descending inference timesteps."
+  ([training-steps steps] (select-timesteps training-steps steps {}))
+  ([training-steps steps {:keys [spacing steps-offset]
+                          :or {spacing "linspace" steps-offset 0}}]
+   (when-not (and (pos-int? training-steps) (pos-int? steps) (<= steps training-steps))
+     (throw (ex-info "invalid inference timestep count"
+                     {:training-steps training-steps :steps steps})))
+   (case spacing
+     "linspace"
+     (if (= steps 1)
+       [(dec training-steps)]
+       (mapv (fn [i]
+               (long (Math/round (* (- 1.0 (/ i (double (dec steps))))
+                                    (dec training-steps)))))
+             (range steps)))
+     "leading"
+     (let [ratio (quot training-steps steps)]
+       (mapv #(+ (long steps-offset) (* ratio %)) (reverse (range steps))))
+     "trailing"
+     (let [ratio (/ training-steps (double steps))]
+       (mapv #(dec (long (Math/round (- training-steps (* % ratio)))))
+             (range steps)))
+     (throw (ex-info "unsupported timestep spacing" {:spacing spacing})))))
 
 (defn ddim-sample
   "Iterative classifier-free-guided DDIM sampling.
@@ -115,8 +127,9 @@
   epsilon. `alphas` is the model training schedule; `timesteps` are descending
   indices into it. `noise-fn`, required only for eta>0, receives
   `(shape timestep)`. Returns the final latent and per-step audit history."
-  [{:keys [sample alphas timesteps denoise-fn positive negative cfg eta noise-fn on-step]
-    :or {cfg 1.0 eta 0.0}}]
+  [{:keys [sample alphas timesteps denoise-fn positive negative cfg eta noise-fn on-step
+           final-alpha]
+    :or {cfg 1.0 eta 0.0 final-alpha 1.0}}]
   (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn))
     (throw (ex-info "DDIM sampler requires sample, alphas, timesteps, and denoise-fn" {})))
   (loop [current sample remaining (seq timesteps) history []]
@@ -125,7 +138,7 @@
             alpha (double (nth alphas timestep))
             alpha-prev (if (some? next-timestep)
                          (double (nth alphas next-timestep))
-                         1.0)
+                         (double final-alpha))
             unconditional (denoise-fn current timestep negative)
             conditional (denoise-fn current timestep positive)
             epsilon (classifier-free-guidance unconditional conditional cfg)
@@ -135,7 +148,8 @@
                     (noise-fn (:shape current) timestep))
             step (ddim-step current epsilon alpha alpha-prev {:eta eta :noise noise})
             event {:timestep timestep :alpha alpha :alpha-prev alpha-prev
-                   :sigma (:sigma step)}]
+                   :sigma (:sigma step) :epsilon epsilon
+                   :sample (:previous-sample step)}]
         (when on-step (on-step event))
         (recur (:previous-sample step) (next remaining) (conj history event)))
       {:sample current :history history})))

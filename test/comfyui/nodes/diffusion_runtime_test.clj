@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [comfyui.exec :as exec]
             [comfyui.clip.tokenizer :as clip-tokenizer]
+            [comfyui.diffusion.scheduler :as scheduler]
             [comfyui.node :as node]
             [comfyui.nodes.diffusion-runtime :as runtime]
             [comfyui.safetensors :as safe]
@@ -110,25 +111,49 @@
         positive (arr/from-vec backend [0.3] [1 1 1 1])
         model {:comfyui/alphas-cumprod [0.9 0.7 0.5]
                :comfyui/denoise (fn [_sample _timestep conditioning] conditioning)}
-        run (fn [sampler-name]
+        run (fn [sampler-name seed]
               (let [workflow {"sample" {:class_type "KSampler"
                                          :inputs {:model model :positive positive
                                                   :negative negative
-                                                  :latent_image sample :seed 7
+                                                  :latent_image sample :seed seed
                                                   :steps 2 :cfg 2.0
                                                   :sampler_name sampler-name
                                                   :scheduler "normal"
                                                   :denoise 1.0}}}]
                 (get-in (exec/execute {:registry registry} workflow)
                         [:results "sample" 0])))
-        ddim (run "ddim")
-        euler (run "euler")
-        ancestral (run "euler_ancestral")]
+        ddim (run "ddim" 7)
+        ddim-again (run "ddim" 7)
+        ddim-other-seed (run "ddim" 8)
+        euler (run "euler" 7)
+        ancestral (run "euler_ancestral" 7)]
     (is (= [1 1 1 1] (:shape ddim) (:shape euler) (:shape ancestral)))
     (is (not= (arr/->vec sample) (arr/->vec ddim)))
     (is (not= (arr/->vec sample) (arr/->vec euler)))
     (is (not= (arr/->vec sample) (arr/->vec ancestral)))
-    (is (not= (arr/->vec ddim) (arr/->vec euler)))))
+    (is (= (arr/->vec ddim) (arr/->vec ddim-again)))
+    (is (not= (arr/->vec ddim) (arr/->vec ddim-other-seed)))))
+
+(deftest ksampler-honors-diffusers-leading-timestep-config
+  (let [registry (node/registry (runtime/pack {:backend backend}))
+        calls (atom [])
+        zero (arr/zeros backend [1 1 1 1])
+        model {:comfyui/alphas-cumprod
+               (scheduler/alphas-cumprod
+                (scheduler/scaled-linear-betas 1000 0.00085 0.012))
+               :comfyui/scheduler-config {"timestep_spacing" "leading"
+                                           "steps_offset" 1
+                                           "set_alpha_to_one" false}
+               :comfyui/denoise (fn [sample timestep _conditioning]
+                                   (swap! calls conj timestep)
+                                   (arr/zeros backend (:shape sample)))}
+        workflow {"sample" {:class_type "KSampler"
+                            :inputs {:model model :positive zero :negative zero
+                                     :latent_image zero :seed 7 :steps 2 :cfg 1.0
+                                     :sampler_name "ddim" :scheduler "normal"
+                                     :denoise 1.0}}}]
+    (exec/execute {:registry registry} workflow)
+    (is (= [501 501 1 1] @calls))))
 
 (deftest checkpoint-backed-unet-graph-runs-through-ksampler
   (let [prefix "model.diffusion_model."

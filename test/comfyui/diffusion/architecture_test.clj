@@ -96,6 +96,18 @@
     (is (= [12 20] (mapv :heads (:encoders spec))))
     (is (= 2 (count (:encoders spec))))))
 
+(deftest infers-small-standalone-diffusers-clip-from-config
+  (let [checkpoint* {:tensors (hf-clip-tensors "text_model." 32)}
+        config {"architectures" ["CLIPTextModel"] "model_type" "clip_text_model"
+                "hidden_size" 32 "num_attention_heads" 4 "num_hidden_layers" 1
+                "layer_norm_eps" 1.0e-5}
+        spec (architecture/infer-diffusers-clip-spec checkpoint* config)]
+    (is (= :diffusers-hf (:format spec)))
+    (is (= 4 (:heads spec)))
+    (is (= 32 (:hidden spec)))
+    (is (nil? (architecture/infer-diffusers-clip-spec
+               checkpoint* (assoc config "num_attention_heads" 3))))))
+
 (defn- openclip-tensors [root hidden]
   (let [layer (str root "transformer.resblocks.0.")
         suffixes ["ln_1.weight" "ln_1.bias" "attn.in_proj_weight"
@@ -250,3 +262,41 @@
     (is (= [:skip-1 :skip-0]
            (mapv :name (filter #(= :cat-saved (:op %)) layers))))
     (is (= [:groupnorm :silu :conv2d] (mapv :op (take-last 3 layers))))))
+
+(deftest infers-complete-diffusers-autoencoder-kl-decoder
+  (let [resnet-suffixes ["norm1.weight" "norm1.bias" "conv1.weight" "conv1.bias"
+                         "norm2.weight" "norm2.bias" "conv2.weight" "conv2.bias"]
+        resnet-prefixes (concat ["decoder.mid_block.resnets.0."
+                                 "decoder.mid_block.resnets.1."]
+                                (for [block (range 2) layer (range 2)]
+                                  (str "decoder.up_blocks." block ".resnets." layer ".")))
+        attention-prefix "decoder.mid_block.attentions.0."
+        attention-suffixes ["group_norm.weight" "group_norm.bias"
+                            "to_q.weight" "to_q.bias" "to_k.weight" "to_k.bias"
+                            "to_v.weight" "to_v.bias"
+                            "to_out.0.weight" "to_out.0.bias"]
+        fixed ["post_quant_conv.weight" "post_quant_conv.bias"
+               "decoder.conv_in.weight" "decoder.conv_in.bias"
+               "decoder.up_blocks.0.upsamplers.0.conv.weight"
+               "decoder.up_blocks.0.upsamplers.0.conv.bias"
+               "decoder.conv_norm_out.weight" "decoder.conv_norm_out.bias"
+               "decoder.conv_out.weight" "decoder.conv_out.bias"]
+        names (concat fixed
+                      (for [prefix resnet-prefixes suffix resnet-suffixes]
+                        (str prefix suffix))
+                      (map #(str attention-prefix %) attention-suffixes))
+        checkpoint* {:tensors (into {} (map (fn [name] [name {"shape" [1]}]) names))}
+        config {"_class_name" "AutoencoderKL" "block_out_channels" [32 64]
+                "up_block_types" ["UpDecoderBlock2D" "UpDecoderBlock2D"]
+                "layers_per_block" 1 "norm_num_groups" 32
+                "latent_channels" 4 "out_channels" 3 "scaling_factor" 0.18215}
+        spec (architecture/infer-diffusers-vae-spec checkpoint* config)]
+    (is (= :diffusers-autoencoder-kl (:architecture spec)))
+    (is (= 0.18215 (:scaling-factor spec)))
+    (is (= [:scale :conv2d :conv2d :resblock :vae-attention :resblock]
+           (mapv :op (take 6 (:layers spec)))))
+    (is (= 6 (count (filter #(= :resblock (:op %)) (:layers spec)))))
+    (is (= [:groupnorm :silu :conv2d]
+           (mapv :op (take-last 3 (:layers spec)))))
+    (is (nil? (architecture/infer-diffusers-vae-spec
+               (update checkpoint* :tensors dissoc "decoder.conv_out.bias") config)))))
