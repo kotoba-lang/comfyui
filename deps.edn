@@ -17,15 +17,14 @@
                       http-kit/http-kit {:mvn/version "2.8.0"}
                       metosin/jsonista  {:mvn/version "0.3.11"}
                       ;; comfyui.nodes.toy-diffusion-test (ADR-2607131500
-                      ;; Phase 1) — a real conv2d+relu+attention node :fn,
-                      ;; dispatched through the real exec.cljc executor.
-                      ;; Pinned to the commit that added num.tensor-async
-                      ;; (toy_diffusion.cljc requires it unconditionally now
-                      ;; — the :clj branch is a real, loadable throwing stub,
-                      ;; not a compile failure, see num.tensor-async's own
-                      ;; docstring).
+                      ;; Phase 1) — real node :fn's, dispatched through the
+                      ;; real exec.cljc executor. Pinned past num.tensor-async
+                      ;; (toy_diffusion.cljc requires it unconditionally — the
+                      ;; :clj branch is a real, loadable throwing stub, not a
+                      ;; compile failure) AND past conv2d-mc/multi-head-
+                      ;; attention (ToyDiffusionStepMC needs both).
                       io.github.kotoba-lang/num
-                      {:git/sha "668fc55f6ff8d4afd38313d19e9cbdee83487371"}}
+                      {:git/sha "4b04bd1e2e13a9edfe9cf910b37ae54c2c9fb7a3"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
   ;; local checkout for workspace development (orgs/kotoba-lang/*)
