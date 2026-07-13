@@ -180,6 +180,11 @@ token/position embeddings, pre-LayerNorm causal multi-head self-attention,
 QuickGELU MLP/residual blocks, and final LayerNorm, returning both
 `[1,77,hidden]` conditioning and pooled embeddings. Transformer tensors are
 loaded once and reused across repeated prompt encodes.
+For recognized SD1/SD2 checkpoints, the loader derives this CLIP graph
+automatically from the standard `CLIPTextModel` tensor catalog: contiguous
+encoder layer count, hidden width/head count, both norms, Q/K/V/out projections,
+MLP weights, and final norm. Auto-mapping is all-or-nothing; a missing tensor
+returns no executable encoder instead of silently constructing a partial model.
 
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
@@ -189,8 +194,8 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-This is not yet a complete SD/SDXL render: automatic CLIP layer-name/config
-mapping, complete
+This is not yet a complete SD/SDXL render: SDXL dual-CLIP mapping/concatenation,
+complete
 production block/config mapping after family detection, additional
 ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
 precision, and an installed real

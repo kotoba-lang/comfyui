@@ -91,6 +91,9 @@
                 spec (if (fn? model-spec)
                        (model-spec ckpt_name checkpoint) model-spec)
                 architecture-info (architecture/infer checkpoint)
+                resolved-clip-spec (or clip-spec
+                                       (architecture/infer-clip-spec
+                                        checkpoint architecture-info))
                 configured-alphas (if (fn? alphas-cumprod)
                                     (alphas-cumprod ckpt_name checkpoint)
                                     alphas-cumprod)
@@ -118,11 +121,11 @@
                                           ["cond_stage_model." "text_encoder." "clip."])
                 executable-clip
                 (cond-> clip-component
-                  clip-spec
-                  (assoc :comfyui/clip-spec clip-spec
+                  resolved-clip-spec
+                  (assoc :comfyui/clip-spec resolved-clip-spec
                          :comfyui/encode
                          (clip-encoder/compile-encoder
-                          clip-component backend clip-spec)))]
+                          clip-component backend resolved-clip-spec)))]
             [executable-model
              executable-clip
              executable-vae]))}

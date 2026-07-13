@@ -44,3 +44,28 @@
     (is (= 1000 (count (architecture/default-alphas-cumprod
                         {:family :stable-diffusion-v1}))))
     (is (nil? (architecture/default-alphas-cumprod {:family :unknown})))))
+
+(deftest infers-complete-standard-sd1-clip-transformer-spec
+  (let [root "cond_stage_model.transformer.text_model."
+        base (checkpoint 768 4 false)
+        layer-base (str root "encoder.layers.0.")
+        names [(str root "embeddings.position_embedding.weight")
+               (str root "final_layer_norm.weight") (str root "final_layer_norm.bias")
+               (str layer-base "layer_norm1.weight") (str layer-base "layer_norm1.bias")
+               (str layer-base "self_attn.q_proj.weight") (str layer-base "self_attn.q_proj.bias")
+               (str layer-base "self_attn.k_proj.weight") (str layer-base "self_attn.k_proj.bias")
+               (str layer-base "self_attn.v_proj.weight") (str layer-base "self_attn.v_proj.bias")
+               (str layer-base "self_attn.out_proj.weight") (str layer-base "self_attn.out_proj.bias")
+               (str layer-base "layer_norm2.weight") (str layer-base "layer_norm2.bias")
+               (str layer-base "mlp.fc1.weight") (str layer-base "mlp.fc1.bias")
+               (str layer-base "mlp.fc2.weight") (str layer-base "mlp.fc2.bias")]
+        complete (update base :tensors merge
+                         (into {} (map (fn [name] [name {"shape" [768]}]) names)))
+        info (architecture/infer complete)
+        spec (architecture/infer-clip-spec complete info)]
+    (is (= 12 (:heads spec)))
+    (is (= 1 (count (:layers spec))))
+    (is (= (str layer-base "self_attn.q_proj.weight")
+           (:query-weight (first (:layers spec)))))
+    (is (nil? (architecture/infer-clip-spec
+               (update complete :tensors dissoc (str layer-base "mlp.fc2.bias")) info)))))
