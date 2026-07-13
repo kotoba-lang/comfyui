@@ -375,7 +375,8 @@
               result
               (reduce
                (fn [{:keys [value saved] :as state} layer]
-                 (case (:op layer)
+                 (let [next-state
+                       (case (:op layer)
                    :conv2d
                    (assoc state :value
                           (t/conv2d-nchw
@@ -473,7 +474,15 @@
                    :timestep-bias
                    (let [bias (* (double (or (:scale layer) 1.0)) (double timestep))
                          scalar (arr/from-vec (:backend value) [bias] [])]
-                     (assoc state :value (t/add value scalar)))))
+                     (assoc state :value (t/add value scalar))))]
+                   (when (and (:release-intermediates? spec)
+                              (not (identical? (:handle value) (:handle sample)))
+                              (not (identical? (:handle value)
+                                               (:handle (:value next-state))))
+                              (not-any? #(identical? (:handle value) (:handle %))
+                                        (vals saved)))
+                     (arr/release! value))
+                   next-state))
                initial layers)
               output (:value result)]
           (when (and same-shape? (not= (:shape sample) (:shape output)))
@@ -495,7 +504,8 @@
   "Compile a checkpoint-backed graph into `(fn [latent] image)`. Unlike a
   denoiser, a decoder may change channel and spatial dimensions."
   [component backend spec]
-  (let [graph (compile-graph component backend spec false)]
+  (let [graph (compile-graph component backend
+                             (assoc spec :release-intermediates? true) false)]
     (with-meta (fn [latent] (graph latent 0 nil)) (meta graph))))
 
 (defn compile-encoder
@@ -503,5 +513,6 @@
   decoder layers separately under `:layers` and expose `:encoder-layers`."
   [component backend spec]
   (let [graph (compile-graph component backend
-                             (assoc spec :layers (:encoder-layers spec)) false)]
+                             (assoc spec :layers (:encoder-layers spec)
+                                    :release-intermediates? true) false)]
     (with-meta (fn [image] (graph image 0 nil)) (meta graph))))

@@ -183,6 +183,12 @@ with eight trained-parameter tensors, loads it through `CheckpointLoaderSimple`,
 runs a U-shaped down/middle/up/skip denoiser under positive and negative CFG,
 and completes two DDIM steps through the actual graph executor.
 
+Call `comfyui.nodes.diffusion-runtime/release-components!` with loaded
+MODEL/CLIP/VAE outputs when unloading a workflow. It deduplicates shared caches,
+destroys cached GPU tensors, clears the caches, and closes each shared
+safetensors mapping once. VAE encoder/decoder graphs also release replaced
+intermediate tensors between layers while preserving caller inputs and outputs.
+
 `comfyui.diffusion.architecture` inspects tensor names/shapes without decoding
 payloads and identifies SD1 (768 context), SD2 (1024), SDXL base (label
 conditioning + 2048), SDXL refiner (label conditioning + 1280), and 9-channel

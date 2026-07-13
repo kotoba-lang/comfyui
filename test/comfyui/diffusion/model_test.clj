@@ -38,6 +38,24 @@
     (is (= [1.0 2.0 0.0, 3.0 4.0 0.0, 0.0 0.0 0.0]
            (arr/->vec output)))))
 
+(deftest vae-encoder-releases-replaced-intermediates-but-not-input-or-output
+  (let [released (atom [])
+        input (arr/from-vec backend (range 16) [1 4 2 2])]
+    (with-redefs [arr/release! (fn [value] (swap! released conj value) nil)]
+      (let [encode (model/compile-encoder
+                    {:comfyui/read-tensor
+                     (fn [_ name] (throw (ex-info "unexpected tensor" {:name name})))}
+                    backend
+                    {:layers []
+                     :encoder-layers [{:op :pad-right-bottom}
+                                      {:op :take-channels :channels 2}
+                                      {:op :scale :factor 0.5}]})
+            output (encode input)]
+        (is (= [1 2 3 3] (:shape output)))
+        (is (= 2 (count @released)))
+        (is (not-any? #(identical? (:handle input) (:handle %)) @released))
+        (is (not-any? #(identical? (:handle output) (:handle %)) @released))))))
+
 (deftest vae-spatial-self-attention-executes-and-caches
   (let [identity (arr/from-vec backend (identity-values 2 2 1.0) [2 2])
         zeros (arr/from-vec backend [0 0] [2])

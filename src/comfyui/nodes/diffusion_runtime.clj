@@ -94,6 +94,27 @@
                                               {:component kind :tensor tensor-name})))
                             (safe/read-tensor checkpoint backend tensor-name))}))
 
+(defn release-components!
+  "Release all distinct compiled tensor caches and safetensors mappings owned
+  by loaded MODEL/CLIP/VAE components. Components and their functions are invalid
+  after this call. Safe to call with the three outputs of one loader together."
+  [components]
+  (let [components (vec (remove nil? components))
+        caches (->> components
+                    (mapcat vals)
+                    (filter fn?)
+                    (keep #(-> % meta :comfyui/tensor-cache))
+                    distinct
+                    vec)
+        checkpoints (->> components
+                         (keep :comfyui/checkpoint)
+                         distinct
+                         vec)]
+    (arr/release-all! (mapcat #(vals @%) caches))
+    (doseq [cache caches] (reset! cache {}))
+    (doseq [checkpoint checkpoints] (safe/close! checkpoint))
+    nil))
+
 (defn- config-value [config key]
   (or (get config key) (get config (keyword key))))
 

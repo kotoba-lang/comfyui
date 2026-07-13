@@ -17,6 +17,18 @@
 
 (def backend (cpu/cpu-backend))
 
+(deftest releasing-components-deduplicates-and-clears-weight-caches
+  (let [weight (arr/from-vec backend [1.0 2.0] [2])
+        cache (atom {"weight" weight})
+        compiled (with-meta (fn [_] nil) {:comfyui/tensor-cache cache})
+        released (atom nil)]
+    (with-redefs [arr/release-all! (fn [arrays]
+                                    (reset! released (vec arrays)) nil)]
+      (is (nil? (runtime/release-components!
+                 [{:comfyui/decode compiled} {:comfyui/encode compiled}])))
+      (is (= [weight] @released))
+      (is (= {} @cache)))))
+
 (defn- checkpoint-fixture []
   (let [header (.getBytes
                 (json/write-str
