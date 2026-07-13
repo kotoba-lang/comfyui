@@ -360,8 +360,8 @@
                          (contains? #{"normal" "karras"} scheduler)
                          (not (and (= "ddim" sampler_name)
                                    (= "karras" scheduler)))
-                         (= 1.0 (double denoise)))
-            (throw (ex-info "runtime KSampler supports normal schedules and Karras for Euler/DPM++ with full denoise"
+                         (< 0.0 (double denoise) 1.0000000001))
+            (throw (ex-info "runtime KSampler supports denoise in (0,1], normal schedules, and Karras for Euler/DPM++"
                             {:sampler-name sampler_name :scheduler scheduler :denoise denoise})))
           (let [denoise-fn (:comfyui/denoise model)
                 alphas (:comfyui/alphas-cumprod model)
@@ -377,30 +377,44 @@
                            (arr/from-vec (:backend sample)
                                          (repeatedly (arr/nelems shape) #(.nextGaussian random))
                                          shape))
+                denoise (double denoise)
+                total-steps (if (= 1.0 denoise)
+                              steps
+                              (max steps (long (/ steps denoise))))
                 karras? (= "karras" scheduler)
                 explicit-sigmas
                 (when karras?
-                  (scheduler/karras-sigmas
-                   steps
-                   (scheduler/alpha->sigma (double (first alphas)))
-                   (scheduler/alpha->sigma (double (last alphas)))))
+                  (vec
+                   (take-last
+                    (inc steps)
+                    (scheduler/karras-sigmas
+                     total-steps
+                     (scheduler/alpha->sigma (double (first alphas)))
+                     (scheduler/alpha->sigma (double (last alphas)))))))
                 timesteps
                 (if karras?
                   (mapv #(scheduler/sigma->timestep alphas %)
                         (butlast explicit-sigmas))
-                  (scheduler/select-timesteps
-                   (count alphas) steps
-                   (if scheduler-config
-                     {:spacing (or (config-value scheduler-config
-                                                   "timestep_spacing") "linspace")
-                      :steps-offset (long (or (config-value scheduler-config
-                                                             "steps_offset") 0))}
-                     {})))
+                  (vec
+                   (take-last
+                    steps
+                    (scheduler/select-timesteps
+                     (count alphas) total-steps
+                     (if scheduler-config
+                       {:spacing (or (config-value scheduler-config
+                                                     "timestep_spacing") "linspace")
+                        :steps-offset (long (or (config-value scheduler-config
+                                                               "steps_offset") 0))}
+                       {})))))
                 initial-timestep (first timesteps)
                 initial-noise (noise-fn (:shape sample) initial-timestep)
                 initial-sample
                 (case sampler_name
-                  "ddim" (t/add sample initial-noise)
+                  "ddim" (if (= 1.0 denoise)
+                           (t/add sample initial-noise)
+                           (scheduler/add-noise
+                            sample initial-noise
+                            (double (nth alphas initial-timestep))))
                   (let [sigma (if explicit-sigmas
                                 (first explicit-sigmas)
                                 (scheduler/alpha->sigma

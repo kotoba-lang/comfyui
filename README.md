@@ -141,7 +141,11 @@ execution while retaining the upstream class names and wire types:
   sigma values are mapped back to fractional model timesteps by interpolation in
   log-sigma space, matching k-diffusion's discrete epsilon-model wrapper.
   The current executable subset is `ddim` + `normal`, or
-  `euler|euler_ancestral|dpmpp_2m` + `normal|karras`, all at full denoise; unsupported sampler
+  `euler|euler_ancestral|dpmpp_2m` + `normal|karras`. Denoise values in `(0,1]`
+  are supported: the runtime builds `floor(steps/denoise)` levels and retains
+  the final requested step interval, matching ComfyUI's partial-denoise schedule
+  slicing. DDIM noises an existing latent in alpha space for partial denoise;
+  sigma samplers use `latent + sigma*noise`. Unsupported sampler
   combinations fail explicitly instead of silently changing algorithms.
 
 ```clojure

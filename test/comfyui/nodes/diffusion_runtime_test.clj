@@ -164,6 +164,49 @@
     (exec/execute {:registry registry} workflow)
     (is (= [501 501 1 1] @calls))))
 
+(deftest ksampler-partial-denoise-slices-normal-and-karras-schedules
+  (let [registry (node/registry (runtime/pack {:backend backend}))
+        calls (atom [])
+        zero (arr/zeros backend [1 1 1 1])
+        model {:comfyui/alphas-cumprod [0.95 0.8 0.6 0.4]
+               :comfyui/denoise (fn [_ timestep conditioning]
+                                  (swap! calls conj timestep) conditioning)}
+        run (fn [sampler scheduler-name denoise]
+              (reset! calls [])
+              (let [workflow
+                    {"sample" {:class_type "KSampler"
+                                :inputs {:model model :positive zero :negative zero
+                                         :latent_image zero :seed 31 :steps 2 :cfg 1.0
+                                         :sampler_name sampler
+                                         :scheduler scheduler-name
+                                         :denoise denoise}}}
+                    output (get-in (exec/execute {:registry registry :cache nil}
+                                                 workflow)
+                                   [:results "sample" 0])]
+                {:output output :calls @calls}))
+        normal-full (run "ddim" "normal" 1.0)
+        normal-partial (run "ddim" "normal" 0.5)
+        karras-full (run "dpmpp_2m" "karras" 1.0)
+        karras-partial (run "dpmpp_2m" "karras" 0.5)
+        karras-partial-again (run "dpmpp_2m" "karras" 0.5)]
+    (is (= [3 3 0 0] (:calls normal-full)))
+    (is (= [1 1 0 0] (:calls normal-partial)))
+    (is (< (first (:calls karras-partial))
+           (first (:calls karras-full))))
+    (is (= 4 (count (:calls karras-partial))))
+    (is (= (arr/->vec (:output karras-partial))
+           (arr/->vec (:output karras-partial-again))))
+    (is (not= (arr/->vec (:output normal-full))
+              (arr/->vec (:output normal-partial))))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"denoise in"
+         (let [workflow {"sample" {:class_type "KSampler"
+                                     :inputs {:model model :positive zero :negative zero
+                                              :latent_image zero :seed 1 :steps 2 :cfg 1.0
+                                              :sampler_name "ddim" :scheduler "normal"
+                                              :denoise 0.0}}}]
+           (exec/execute {:registry registry :cache nil} workflow))))))
+
 (deftest checkpoint-backed-unet-graph-runs-through-ksampler
   (let [prefix "model.diffusion_model."
         tensors
