@@ -21,13 +21,10 @@
                       http-kit/http-kit {:mvn/version "2.8.0"}
                       metosin/jsonista  {:mvn/version "0.3.11"}
                       ;; comfyui.nodes.toy-diffusion-test (ADR-2607131500
-                      ;; Phase 1) — a real conv2d+relu+attention node :fn,
-                      ;; dispatched through the real exec.cljc executor.
-                      ;; Pinned to the commit that added num.tensor-async
-                      ;; (toy_diffusion.cljc requires it unconditionally now
-                      ;; — the :clj branch is a real, loadable throwing stub,
-                      ;; not a compile failure, see num.tensor-async's own
-                      ;; docstring).
+                      ;; Phase 1) exercises both single- and multi-channel
+                      ;; real node functions. The workspace num dependency
+                      ;; above contains tensor-async, conv2d-mc, and
+                      ;; multi-head-attention.
                       }
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
