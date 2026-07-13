@@ -2,6 +2,7 @@
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is]]
             [comfyui.exec :as exec]
+            [comfyui.clip.tokenizer :as clip-tokenizer]
             [comfyui.node :as node]
             [comfyui.nodes.diffusion-runtime :as runtime]
             [comfyui.safetensors :as safe]
@@ -179,11 +180,16 @@
                    {:op :conv2d
                     :weight "first_stage_model.decoder.output.weight"
                     :bias "first_stage_model.decoder.output.bias"}]}
+        tokenizer (clip-tokenizer/tokenizer
+                   {"<|startoftext|>" 49406 "<|endoftext|>" 49407
+                    "hello</w>" 100}
+                   [["h" "e"] ["he" "l"] ["hel" "l"] ["hell" "o</w>"]])
         registry (node/registry
                   (runtime/pack {:backend backend
                                  :resolve-checkpoint (constantly path)
                                  :model-spec spec
                                  :vae-spec vae-spec
+                                 :clip-tokenizer tokenizer
                                  :output-directory output-dir
                                  :alphas-cumprod [0.95 0.8 0.6]}))
         sample (arr/from-vec backend
@@ -202,6 +208,8 @@
                   "decode" {:class_type "VAEDecode"
                             :inputs {:samples ["sample" 0]
                                      :vae ["load" 2]}}
+                  "prompt" {:class_type "CLIPTextEncode"
+                            :inputs {:clip ["load" 1] :text "hello"}}
                   "save" {:class_type "SaveImage"
                           :inputs {:images ["decode" 0]
                                    :filename_prefix "render"}}}]
@@ -211,6 +219,7 @@
             vae (get-in result [:results "load" 2])
             output (get-in result [:results "sample" 0])
             image (get-in result [:results "decode" 0])
+            prompt (get-in result [:results "prompt" 0])
             saved (get-in result [:results "save" 0 :images 0])
             png-path (.resolve output-dir "render_00000.png")
             denoise (:comfyui/denoise model)
@@ -218,9 +227,11 @@
             conditional (denoise sample 2 positive)
             later-timestep (denoise sample 1 positive)
             cache (:comfyui/tensor-cache (meta (:comfyui/denoise model)))]
-        (is (= ["load" "sample" "decode" "save"] (:executed result)))
+        (is (= #{"load" "sample" "decode" "prompt" "save"}
+               (set (:executed result))))
         (is (= [1 4 4 4] (:shape output)))
         (is (= [1 32 32 3] (:shape image)))
+        (is (= [49406 100 49407] (subvec (:input-ids prompt) 0 3)))
         (is (every? #(<= 0.0 % 1.0) (arr/->vec image)))
         (is (= (str png-path) (:path saved)))
         (is (Files/exists png-path (make-array java.nio.file.LinkOption 0)))

@@ -170,6 +170,12 @@ used as evidence and returns `:unknown` for ambiguous layouts. Recognized
 families automatically receive the exact 1000-step CompVis `scaled_linear`
 beta/alpha schedule unless the host supplies one explicitly.
 
+`comfyui.clip.tokenizer` implements OpenAI CLIP's byte-to-Unicode mapping,
+Unicode-aware splitting, ranked byte-pair merges, special tokens, and 77-token
+padding/truncation from standard `encoder.json` and `merges.txt` files. The
+executable `CLIPTextEncode` node turns prompt text plus a loaded CLIP component
+into token IDs and an attention mask inside the checkpoint-to-PNG graph.
+
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
 decoder conv/normalization/upsampling, converts NCHW RGB from `[-1,1]` to
@@ -178,7 +184,8 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-This is not yet a complete SD/SDXL render: CLIP tokenization/encoding, complete
+This is not yet a complete SD/SDXL render: CLIP transformer encoding after
+tokenization, complete
 production block/config mapping after family detection, additional
 ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
 precision, and an installed real

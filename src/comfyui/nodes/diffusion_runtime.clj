@@ -67,12 +67,13 @@
   - `:model-spec` graph map, or `(fn [ckpt-name checkpoint] graph-map)`
   - `:vae-spec` decoder graph map, or resolver function
   - `:output-directory` destination for executable SaveImage PNG files
+  - `:clip-tokenizer` OpenAI CLIP BPE tokenizer function
   - `:alphas-cumprod` schedule vector, or a resolver function
 
   The MODEL/CLIP/VAE maps share one lazy SafeTensorFile. The host owns its
   lifecycle and closes `:comfyui/checkpoint` when the workflow/model unloads."
   [{:keys [backend resolve-checkpoint model-spec vae-spec alphas-cumprod
-           output-directory]
+           output-directory clip-tokenizer]
     :or {resolve-checkpoint identity}}]
   [{:type "CheckpointLoaderSimple"
     :category "loaders"
@@ -115,6 +116,17 @@
              (component checkpoint :clip
                         ["cond_stage_model." "text_encoder." "clip."])
              executable-vae]))}
+   {:type "CLIPTextEncode"
+    :category "conditioning"
+    :inputs {:clip {:type "CLIP"}
+             :text {:type "STRING" :multiline true}}
+    :outputs [{:name "CONDITIONING" :type "CONDITIONING"}]
+    :fn (fn [{:keys [clip text]}]
+          (when-not (and (= :clip (:comfyui/component clip))
+                         (fn? clip-tokenizer))
+            (throw (ex-info "CLIPTextEncode requires a CLIP component and tokenizer"
+                            {:clip-keys (keys clip)})))
+          [(assoc (clip-tokenizer text) :clip clip :text text)])}
    {:type "EmptyLatentImage"
     :category "latent"
     :inputs {:width {:type "INT" :default 512}
