@@ -379,6 +379,12 @@ safetensors windows without first allocating per-element JavaScript numbers;
 older backends retain the decoded-vector fallback. NCHW channel embedding broadcast is
 lowered through device-native transpose plus last-axis bias dispatch, so this
 real UNet path performs no synchronous GPU readback.
+F16 safetensors windows use the same route when supported: encoded half words
+are uploaded unchanged, expanded by Metal's `unpack2x16float` kernel into the
+current f32 execution graph, and the temporary packed buffer is immediately
+retired. `safetensors-deno-metal-verify` builds a valid odd-length F16 file and
+proves both device expansion and exact return to the GPU-memory baseline; an
+older num backend exercises the numerically identical host fallback.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against

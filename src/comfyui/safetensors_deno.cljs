@@ -29,6 +29,7 @@
             (throw (ex-info "invalid safetensors tensor" {:name name :entry entry})))))
       {:path path :bytes bytes :data-start data-start :tensors tensors
        :stats (atom {:direct-uploads 0 :direct-bytes 0
+                     :direct-dtypes {}
                      :decoded-uploads 0 :decoded-elements 0})})))
 
 (defn tensor-names [checkpoint] (vec (sort (keys (:tensors checkpoint)))))
@@ -71,17 +72,23 @@
       (throw (ex-info "tensor absent from safetensors" {:tensor tensor-name
                                                          :path (:path checkpoint)})))
     (let [shape (get entry "shape")
-          dtype-name (get entry "dtype")]
-      (if-let [upload (and (= "F32" dtype-name)
-                           (resolve 'num.deno-gpu/upload-byte-view))]
+          dtype-name (get entry "dtype")
+          upload (case dtype-name
+                   "F32" (when-let [f (resolve 'num.deno-gpu/upload-byte-view)]
+                           #(f backend % shape :f32))
+                   "F16" (when-let [f (resolve 'num.deno-gpu/upload-f16-as-f32-byte-view)]
+                           #(f backend % shape))
+                   nil)]
+      (if upload
         (let [[start end] (get entry "data_offsets")
               offset (+ (:data-start checkpoint) start)
               bytes (:bytes checkpoint)
               window (.subarray bytes offset (+ (:data-start checkpoint) end))]
           (swap! (:stats checkpoint)
                  #(-> % (update :direct-uploads inc)
-                      (update :direct-bytes + (- end start))))
-          (upload backend window shape :f32))
+                      (update :direct-bytes + (- end start))
+                      (update-in [:direct-dtypes dtype-name] (fnil inc 0))))
+          (upload window))
         (do
           (swap! (:stats checkpoint)
                  #(-> % (update :decoded-uploads inc)
