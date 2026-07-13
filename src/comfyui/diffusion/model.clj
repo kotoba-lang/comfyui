@@ -14,7 +14,7 @@
 (def ^:private supported-ops
   #{:conv2d :groupnorm :silu :save :add-saved :cat-saved :upsample
     :scale :add-conditioning :cross-attention :timestep-bias :timestep-embedding
-    :timestep-vector :sdxl-label-embedding :add-embedding})
+    :timestep-vector :sdxl-label-embedding :add-embedding :resblock})
 
 (defn- fail [message data]
   (throw (ex-info (str "comfyui.diffusion.model: " message) data)))
@@ -83,6 +83,39 @@
       (fail "embedding projection must produce one value per channel"
             {:projected (:shape projected) :value (:shape value)}))
     (t/add value (t/reshape projected [1 channels 1 1]))))
+
+(defn- resblock [value embedding tensor! layer]
+  (let [groups (or (:groups layer) 32)
+        residual value
+        hidden (-> value
+                   (t/group-norm-nchw groups
+                                      (tensor! (:in-norm-weight layer))
+                                      (tensor! (:in-norm-bias layer)) 1.0e-5)
+                   t/silu
+                   (t/conv2d-nchw (tensor! (:in-conv-weight layer))
+                                  (tensor! (:in-conv-bias layer))
+                                  {:padding 1}))
+        hidden (if (:embedding-weight layer)
+                 (add-embedding hidden embedding tensor!
+                                {:weight (:embedding-weight layer)
+                                 :bias (:embedding-bias layer)})
+                 hidden)
+        hidden (-> hidden
+                   (t/group-norm-nchw groups
+                                      (tensor! (:out-norm-weight layer))
+                                      (tensor! (:out-norm-bias layer)) 1.0e-5)
+                   t/silu
+                   (t/conv2d-nchw (tensor! (:out-conv-weight layer))
+                                  (tensor! (:out-conv-bias layer))
+                                  {:padding 1}))
+        residual (if (:skip-weight layer)
+                   (t/conv2d-nchw residual (tensor! (:skip-weight layer))
+                                  (tensor! (:skip-bias layer)))
+                   residual)]
+    (when-not (= (:shape hidden) (:shape residual))
+      (fail "ResBlock hidden/skip shapes differ"
+            {:hidden (:shape hidden) :skip (:shape residual)}))
+    (nm/add residual hidden)))
 
 (defn- cross-attention
   [value condition tensor! layer]
@@ -253,6 +286,10 @@
                    :add-embedding
                    (assoc state :value
                           (add-embedding value (:embedding state) tensor! layer))
+
+                   :resblock
+                   (assoc state :value
+                          (resblock value (:embedding state) tensor! layer))
 
                    :timestep-bias
                    (let [bias (* (double (or (:scale layer) 1.0)) (double timestep))

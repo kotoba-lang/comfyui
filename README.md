@@ -205,6 +205,13 @@ prepends executable timestep and SDXL label-vector construction automatically.
 The graph concatenates projected pooled CLIP-G with sinusoidal embeddings of
 the six time IDs, runs the learned label MLP, adds it to the timestep vector,
 and exposes that shared state to ResBlock `:add-embedding` projections.
+`infer-unet-layout` now enumerates every indexed input, middle, and output
+module from a CompVis checkpoint, classifying input convolution, ResBlock,
+SpatialTransformer, downsample, and upsample modules. It rejects missing block
+indices, unknown modules, incomplete middle blocks, or missing final norm/conv
+tensors. Complete ResBlock catalogs lower to an executable compound operation
+covering both norms/convolutions, learned timestep/label projection, optional
+1×1 skip projection, and residual addition.
 
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and

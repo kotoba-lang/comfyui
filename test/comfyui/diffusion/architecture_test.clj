@@ -137,3 +137,53 @@
     (is (nil? (architecture/infer-sdxl-conditioning-layers
                (update checkpoint* :tensors dissoc
                        "model.diffusion_model.label_emb.0.2.bias") info)))))
+
+(deftest enumerates-complete-compvis-unet-topology
+  (let [root "model.diffusion_model."
+        names ["input_blocks.0.0.weight"
+               "input_blocks.1.0.in_layers.0.weight"
+               "input_blocks.1.1.transformer_blocks.0.attn2.to_k.weight"
+               "input_blocks.2.0.op.weight"
+               "middle_block.0.in_layers.0.weight"
+               "middle_block.1.transformer_blocks.0.attn2.to_k.weight"
+               "middle_block.2.in_layers.0.weight"
+               "output_blocks.0.0.in_layers.0.weight"
+               "output_blocks.0.1.transformer_blocks.0.attn2.to_k.weight"
+               "output_blocks.1.0.in_layers.0.weight"
+               "output_blocks.1.1.conv.weight"
+               "out.0.weight" "out.0.bias" "out.2.weight" "out.2.bias"]
+        checkpoint* {:tensors (into {} (map (fn [name]
+                                              [(str root name) {"shape" [1]}]) names))}
+        layout (architecture/infer-unet-layout checkpoint*)]
+    (is (:complete? layout))
+    (is (= [:input-conv]
+           (mapv :kind (:modules (first (:input-blocks layout))))))
+    (is (= [:resblock :spatial-transformer]
+           (mapv :kind (:modules (second (:input-blocks layout))))))
+    (is (= [:resblock :spatial-transformer :resblock]
+           (mapv :kind (:middle-block layout))))
+    (is (= :upsample
+           (:kind (second (:modules (second (:output-blocks layout)))))))
+    (is (false? (:complete? (architecture/infer-unet-layout
+                             (update checkpoint* :tensors dissoc
+                                     (str root "out.2.bias"))))))))
+
+(deftest lowers-complete-resblock-tensor-catalog
+  (let [prefix "model.diffusion_model.input_blocks.1.0."
+        suffixes ["in_layers.0.weight" "in_layers.0.bias"
+                  "in_layers.2.weight" "in_layers.2.bias"
+                  "emb_layers.1.weight" "emb_layers.1.bias"
+                  "out_layers.0.weight" "out_layers.0.bias"
+                  "out_layers.3.weight" "out_layers.3.bias"
+                  "skip_connection.weight" "skip_connection.bias"]
+        checkpoint* {:tensors (into {} (map (fn [suffix]
+                                              [(str prefix suffix) {"shape" [1]}]) suffixes))}
+        layer (architecture/infer-resblock-layer
+               checkpoint* {:kind :resblock :prefix prefix})]
+    (is (= :resblock (:op layer)))
+    (is (= 32 (:groups layer)))
+    (is (= (str prefix "emb_layers.1.weight") (:embedding-weight layer)))
+    (is (= (str prefix "skip_connection.weight") (:skip-weight layer)))
+    (is (nil? (architecture/infer-resblock-layer
+               (update checkpoint* :tensors dissoc (str prefix "out_layers.3.bias"))
+               {:kind :resblock :prefix prefix})))))

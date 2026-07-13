@@ -91,7 +91,111 @@
           :second-weight time-second-weight :second-bias time-second-bias}
          {:op :sdxl-label-embedding
           :first-weight label-first-weight :first-bias label-first-bias
-          :second-weight label-second-weight :second-bias label-second-bias}]))))
+         :second-weight label-second-weight :second-bias label-second-bias}]))))
+
+(defn- indexed-values [names pattern group]
+  (->> names
+       (keep #(some-> (re-matches pattern %)
+                      (nth group) Long/parseLong))
+       distinct sort vec))
+
+(defn- module-kind [names prefix section block module]
+  (let [base (if (= section "middle_block")
+               (str prefix section "." module ".")
+               (str prefix section "." block "." module "."))
+        present? #(contains? names (str base %))]
+    (cond
+      (present? "in_layers.0.weight") :resblock
+      (some #(str/starts-with? % (str base "transformer_blocks.0.")) names)
+      :spatial-transformer
+      (present? "op.weight") :downsample
+      (present? "conv.weight") :upsample
+      (and (= section "input_blocks") (= block 0) (= module 0)
+           (present? "weight")) :input-conv
+      :else :unknown)))
+
+(defn- section-layout [names prefix section]
+  (let [pattern (re-pattern
+                 (str "^" (Pattern/quote (str prefix section "."))
+                      "(\\d+)\\.(\\d+)\\..+$"))
+        blocks (indexed-values names pattern 1)]
+    (mapv
+     (fn [block]
+       (let [block-pattern (re-pattern
+                            (str "^" (Pattern/quote (str prefix section "." block "."))
+                                 "(\\d+)\\..+$"))
+             modules (indexed-values names block-pattern 1)]
+         {:index block
+          :modules (mapv (fn [module]
+                           {:index module
+                            :kind (module-kind names prefix section block module)
+                            :prefix (str prefix section "." block "." module ".")})
+                         modules)}))
+     blocks)))
+
+(defn infer-unet-layout
+  "Enumerate a CompVis SD/SDXL UNet topology from tensor names without decoding
+  payloads. `:complete?` requires contiguous block indices, known module kinds,
+  all three middle modules, and final norm/conv tensors."
+  [checkpoint]
+  (let [names (set (safe/tensor-names checkpoint))
+        input-name (find-name names "diffusion_model.input_blocks.0.0.weight")
+        marker "input_blocks.0.0.weight"
+        prefix (when input-name (subs input-name 0 (- (count input-name) (count marker))))
+        inputs (when prefix (section-layout names prefix "input_blocks"))
+        outputs (when prefix (section-layout names prefix "output_blocks"))
+        middle (when prefix
+                 (mapv (fn [module]
+                         {:index module
+                          :kind (module-kind names prefix "middle_block" 0 module)
+                          :prefix (str prefix "middle_block." module ".")})
+                       (range 3)))
+        contiguous? (fn [blocks]
+                      (= (mapv :index blocks) (vec (range (count blocks)))))
+        final-norm (when prefix (str prefix "out.0.weight"))
+        final-conv (when prefix (str prefix "out.2.weight"))
+        known? #(not= :unknown (:kind %))
+        complete? (boolean
+                   (and prefix (seq inputs) (seq outputs)
+                        (contiguous? inputs) (contiguous? outputs)
+                        (every? known? (mapcat :modules inputs))
+                        (every? known? (mapcat :modules outputs))
+                        (= [:resblock :spatial-transformer :resblock]
+                           (mapv :kind middle))
+                        (contains? names final-norm)
+                        (contains? names (str prefix "out.0.bias"))
+                        (contains? names final-conv)
+                        (contains? names (str prefix "out.2.bias"))))]
+    {:prefix prefix :input-blocks (or inputs []) :middle-block middle
+     :output-blocks (or outputs []) :final-norm final-norm
+     :final-conv final-conv :complete? complete?}))
+
+(defn infer-resblock-layer
+  "Lower one enumerated `:resblock` module to the executable graph vocabulary.
+  Returns nil unless every mandatory tensor and each optional skip pair exists."
+  [checkpoint {:keys [kind prefix]}]
+  (when (= :resblock kind)
+    (let [names (set (safe/tensor-names checkpoint))
+          tensor #(str prefix %)
+          layer {:op :resblock :groups 32
+                 :in-norm-weight (tensor "in_layers.0.weight")
+                 :in-norm-bias (tensor "in_layers.0.bias")
+                 :in-conv-weight (tensor "in_layers.2.weight")
+                 :in-conv-bias (tensor "in_layers.2.bias")
+                 :embedding-weight (tensor "emb_layers.1.weight")
+                 :embedding-bias (tensor "emb_layers.1.bias")
+                 :out-norm-weight (tensor "out_layers.0.weight")
+                 :out-norm-bias (tensor "out_layers.0.bias")
+                 :out-conv-weight (tensor "out_layers.3.weight")
+                 :out-conv-bias (tensor "out_layers.3.bias")}
+          skip-weight (tensor "skip_connection.weight")
+          skip-bias (tensor "skip_connection.bias")
+          mandatory (vals (dissoc layer :op :groups))
+          skip-present [(contains? names skip-weight) (contains? names skip-bias)]]
+      (when (and (every? names mandatory) (or (every? true? skip-present)
+                                              (every? false? skip-present)))
+        (cond-> layer
+          (first skip-present) (assoc :skip-weight skip-weight :skip-bias skip-bias))))))
 
 (defn- infer-hf-clip-spec [checkpoint names root]
     (let [token-name (str root "embeddings.token_embedding.weight")

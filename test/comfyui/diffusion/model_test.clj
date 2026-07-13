@@ -101,3 +101,45 @@
     (is (= 10 @reads))
     (denoise sample 20 condition-a)
     (is (= 10 @reads) "SDXL embedding tensors remain cached")))
+
+(deftest standard-compvis-resblock-executes-learned-skip-and-embedding
+  (let [norm-w (arr/from-vec backend [1 1] [2])
+        norm-b (arr/from-vec backend [0 0] [2])
+        conv-w (arr/from-vec backend
+                             (vec (for [out (range 2) in (range 2)
+                                        row (range 3) col (range 3)]
+                                    (if (and (= out in) (= row 1) (= col 1))
+                                      0.25 0.0))) [2 2 3 3])
+        arrays {"time.0.w" (arr/from-vec backend (identity-values 4 4 0.2) [4 4])
+                "time.0.b" (arr/zeros backend [4])
+                "time.2.w" (arr/from-vec backend (identity-values 4 4 0.3) [4 4])
+                "time.2.b" (arr/zeros backend [4])
+                "in.norm.w" norm-w "in.norm.b" norm-b
+                "in.conv.w" conv-w "in.conv.b" norm-b
+                "emb.w" (arr/from-vec backend [0.2 0.1 -0.1 0.3,
+                                                -0.2 0.4 0.1 0.2] [2 4])
+                "emb.b" norm-b
+                "out.norm.w" norm-w "out.norm.b" norm-b
+                "out.conv.w" conv-w "out.conv.b" norm-b
+                "skip.w" (arr/from-vec backend (identity-values 2 2 0.75) [2 2 1 1])
+                "skip.b" norm-b}
+        component {:comfyui/read-tensor (fn [_ name] (get arrays name))}
+        spec {:layers
+              [{:op :timestep-vector
+                :first-weight "time.0.w" :first-bias "time.0.b"
+                :second-weight "time.2.w" :second-bias "time.2.b"}
+               {:op :resblock :groups 1
+                :in-norm-weight "in.norm.w" :in-norm-bias "in.norm.b"
+                :in-conv-weight "in.conv.w" :in-conv-bias "in.conv.b"
+                :embedding-weight "emb.w" :embedding-bias "emb.b"
+                :out-norm-weight "out.norm.w" :out-norm-bias "out.norm.b"
+                :out-conv-weight "out.conv.w" :out-conv-bias "out.conv.b"
+                :skip-weight "skip.w" :skip-bias "skip.b"}]}
+        denoise (model/compile-denoiser component backend spec)
+        sample (arr/from-vec backend (mapv #(- (* 0.1 %) 0.4) (range 16))
+                             [1 2 2 4])
+        output-a (denoise sample 5 nil)
+        output-b (denoise sample 15 nil)]
+    (is (= (:shape sample) (:shape output-a)))
+    (is (every? #(Double/isFinite %) (arr/->vec output-a)))
+    (is (not= (arr/->vec output-a) (arr/->vec output-b)))))
