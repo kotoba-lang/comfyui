@@ -417,6 +417,33 @@ PNG of 852 bytes; its fully F16 checkpoint run emits 848 bytes. The verifier
 parses IHDR dimensions itself, requires a non-empty compressed artifact, and an
 external `file` probe recognizes both outputs as 8-bit/color RGB PNG files.
 
+`comfyui.nodes.diffusion-runtime-deno/pack` exposes this path through real
+ComfyUI node types rather than verifier-only function calls. Its executable
+`DiffusersPipelineLoader`, `CLIPTextEncode`, `EmptyLatentImage`, `KSampler`,
+`VAEDecode`, and `SaveImage` nodes are registered in the ordinary node registry
+and run through `comfyui.exec/execute-async`. Tokenization and seeded noise stay
+explicit host capabilities; unsupported sampler combinations fail rather than
+silently changing algorithms. The live graph gate runs this API-format graph:
+
+```text
+DiffusersPipelineLoader ─┬─ CLIPTextEncode(positive) ─┐
+                         ├─ CLIPTextEncode(negative) ─┼─ KSampler
+EmptyLatentImage ─────────────────────────────────────┘     │
+DiffusersPipelineLoader.VAE ────────────────────────── VAEDecode → SaveImage
+```
+
+```sh
+clojure -M:real-diffusers-graph-metal-verify
+deno run --allow-all target/real-diffusers-graph-metal-verify.cjs \
+  pipeline.edn unet/model.safetensors text_encoder/model.safetensors \
+  vae/model.safetensors output-directory
+```
+
+Both F32 and fully converted F16 public checkpoints execute all seven nodes,
+match their independent numerical oracles, emit 852/848-byte PNGs, close the
+three lazy files, release conditioning/latent/image and all cached weights, and
+finish at zero tracked GPU buffers. The measured F32 peak is 7,738,644 bytes.
+
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
 upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,
