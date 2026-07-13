@@ -64,3 +64,24 @@
     (is (= [2 1] (mapv :timestep @events)))
     (is (approx? (first (arr/->vec expected))
                  (first (arr/->vec (:sample result)))))))
+
+(deftest euler-discrete-integrates-the-sigma-schedule
+  (let [sample (arr/from-vec backend [2.0] [1])
+        uncond (arr/from-vec backend [0.1] [1])
+        cond (arr/from-vec backend [0.3] [1])
+        alphas [0.9 0.7 0.5]
+        events (atom [])
+        result (scheduler/euler-sample
+                {:sample sample :alphas alphas :timesteps [2 1]
+                 :negative uncond :positive cond :cfg 2.0
+                 :denoise-fn (fn [_model-input _timestep conditioning]
+                               conditioning)
+                 :on-step #(swap! events conj %)})
+        epsilon 0.5
+        sigma2 (scheduler/alpha->sigma 0.5)
+        sigma1 (scheduler/alpha->sigma 0.7)
+        expected (+ 2.0 (* epsilon (- sigma1 sigma2)) (* epsilon (- 0.0 sigma1)))]
+    (is (approx? 1.0 sigma2))
+    (is (= [2 1] (mapv :timestep @events)))
+    (is (zero? (:sigma-next (last @events))))
+    (is (approx? expected (first (arr/->vec (:sample result)))))))

@@ -109,15 +109,23 @@
         positive (arr/from-vec backend [0.3] [1 1 1 1])
         model {:comfyui/alphas-cumprod [0.9 0.7 0.5]
                :comfyui/denoise (fn [_sample _timestep conditioning] conditioning)}
-        workflow {"sample" {:class_type "KSampler"
-                             :inputs {:model model :positive positive :negative negative
-                                      :latent_image sample :seed 7 :steps 2 :cfg 2.0
-                                      :sampler_name "ddim" :scheduler "normal"
-                                      :denoise 1.0}}}
-        output (get-in (exec/execute {:registry registry} workflow)
-                       [:results "sample" 0])]
-    (is (= [1 1 1 1] (:shape output)))
-    (is (not= (arr/->vec sample) (arr/->vec output)))))
+        run (fn [sampler-name]
+              (let [workflow {"sample" {:class_type "KSampler"
+                                         :inputs {:model model :positive positive
+                                                  :negative negative
+                                                  :latent_image sample :seed 7
+                                                  :steps 2 :cfg 2.0
+                                                  :sampler_name sampler-name
+                                                  :scheduler "normal"
+                                                  :denoise 1.0}}}]
+                (get-in (exec/execute {:registry registry} workflow)
+                        [:results "sample" 0])))
+        ddim (run "ddim")
+        euler (run "euler")]
+    (is (= [1 1 1 1] (:shape ddim) (:shape euler)))
+    (is (not= (arr/->vec sample) (arr/->vec ddim)))
+    (is (not= (arr/->vec sample) (arr/->vec euler)))
+    (is (not= (arr/->vec ddim) (arr/->vec euler)))))
 
 (deftest checkpoint-backed-unet-graph-runs-through-ksampler
   (let [prefix "model.diffusion_model."

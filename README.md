@@ -130,8 +130,10 @@ execution while retaining the upstream class names and wire types:
   deterministic path and eta/noise variance path, inside `comfyui.exec`.
 - `KSampler` selects descending training timesteps and repeatedly invokes an
   executable checkpoint model with positive/negative conditioning, applies
-  classifier-free guidance, and advances the latent through DDIM. The current
-  executable subset is `ddim` + `normal` + full denoise; unsupported sampler
+  classifier-free guidance, and advances the latent through DDIM or Euler
+  discrete. Euler converts cumulative alpha to sigma, scales model input, and
+  integrates the epsilon ODE through final sigma zero. The current executable
+  subset is `ddim|euler` + `normal` + full denoise; unsupported sampler
   combinations fail explicitly instead of silently changing algorithms.
 
 ```clojure
@@ -167,8 +169,9 @@ codec. The end-to-end runtime fixture executes
 32×32 PNG, and verifies its signature and output metadata.
 
 This is not yet a complete SD/SDXL render: upstream architecture detection,
-CLIP tokenization/encoding, complete production block/config mapping, non-DDIM sampler
-families, full upstream VAE architecture mapping, mixed precision, and an installed real
+CLIP tokenization/encoding, complete production block/config mapping, additional
+ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
+precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 

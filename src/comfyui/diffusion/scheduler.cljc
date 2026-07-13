@@ -123,3 +123,39 @@
         (when on-step (on-step event))
         (recur (:previous-sample step) (next remaining) (conj history event)))
       {:sample current :history history})))
+
+(defn alpha->sigma
+  "Convert cumulative alpha to the Euler/Karras noise level
+  `sqrt((1-alpha)/alpha)`."
+  [alpha]
+  (when-not (< 0.0 alpha 1.0)
+    (throw (ex-info "alpha must be in (0,1)" {:alpha alpha})))
+  (Math/sqrt (/ (- 1.0 (double alpha)) (double alpha))))
+
+(defn euler-sample
+  "Classifier-free-guided Euler discrete sampling for epsilon-prediction
+  models. Model input is scaled by `1/sqrt(sigma^2+1)`; each step integrates
+  the ODE derivative from the current training sigma to the next (final 0)."
+  [{:keys [sample alphas timesteps denoise-fn positive negative cfg on-step]
+    :or {cfg 1.0}}]
+  (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn))
+    (throw (ex-info "Euler sampler requires sample, alphas, timesteps, and denoise-fn" {})))
+  (loop [current sample remaining (seq timesteps) history []]
+    (if-let [timestep (first remaining)]
+      (let [next-timestep (second remaining)
+            sigma (alpha->sigma (double (nth alphas timestep)))
+            sigma-next (if (some? next-timestep)
+                         (alpha->sigma (double (nth alphas next-timestep)))
+                         0.0)
+            model-input (scale current (/ 1.0 (Math/sqrt (+ 1.0 (* sigma sigma)))))
+            unconditional (denoise-fn model-input timestep negative)
+            conditional (denoise-fn model-input timestep positive)
+            epsilon (classifier-free-guidance unconditional conditional cfg)
+            predicted-x0 (t/sub current (scale epsilon sigma))
+            dt (- sigma-next sigma)
+            next-sample (t/add current (scale epsilon dt))
+            event {:timestep timestep :sigma sigma :sigma-next sigma-next
+                   :predicted-original-sample predicted-x0}]
+        (when on-step (on-step event))
+        (recur next-sample (next remaining) (conj history event)))
+      {:sample current :history history})))
