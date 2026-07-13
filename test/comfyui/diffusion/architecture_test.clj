@@ -187,3 +187,66 @@
     (is (nil? (architecture/infer-resblock-layer
                (update checkpoint* :tensors dissoc (str prefix "out_layers.3.bias"))
                {:kind :resblock :prefix prefix})))))
+
+(deftest lowers-complete-spatial-transformer-catalog
+  (let [prefix "model.diffusion_model.input_blocks.1.1."
+        block (str prefix "transformer_blocks.0.")
+        fixed ["norm.weight" "norm.bias" "proj_in.weight" "proj_in.bias"
+               "proj_out.weight" "proj_out.bias"]
+        block-suffixes
+        ["norm1.weight" "norm1.bias" "norm2.weight" "norm2.bias"
+         "norm3.weight" "norm3.bias"
+         "attn1.to_q.weight" "attn1.to_k.weight" "attn1.to_v.weight"
+         "attn1.to_out.0.weight" "attn1.to_out.0.bias"
+         "attn2.to_q.weight" "attn2.to_k.weight" "attn2.to_v.weight"
+         "attn2.to_out.0.weight" "attn2.to_out.0.bias"
+         "ff.net.0.proj.weight" "ff.net.0.proj.bias"
+         "ff.net.2.weight" "ff.net.2.bias"]
+        tensors (merge
+                 (into {} (map (fn [suffix] [(str prefix suffix) {"shape" [64]}]) fixed))
+                 (into {} (map (fn [suffix]
+                                 [(str block suffix)
+                                  {"shape" (if (= suffix "attn1.to_q.weight")
+                                             [64 64] [64])}]) block-suffixes)))
+        checkpoint* {:tensors tensors}
+        module {:kind :spatial-transformer :prefix prefix}
+        layer (architecture/infer-spatial-transformer-layer checkpoint* module)]
+    (is (= :spatial-transformer (:op layer)))
+    (is (= 1 (get-in layer [:blocks 0 :heads])))
+    (is (= (str block "attn2.to_k.weight")
+           (get-in layer [:blocks 0 :cross-attention :key-weight])))
+    (is (false? (:linear-projection? layer)))
+    (is (nil? (architecture/infer-spatial-transformer-layer
+               (update checkpoint* :tensors dissoc (str block "ff.net.2.bias"))
+               module)))))
+
+(deftest assembles-complete-unet-graph-with-reversed-skips
+  (let [prefix "model.diffusion_model."
+        checkpoint* {:tensors {(str prefix "input_blocks.0.0.weight") {"shape" [4 4 3 3]}
+                               (str prefix "input_blocks.0.0.bias") {"shape" [4]}
+                               (str prefix "out.0.weight") {"shape" [4]}
+                               (str prefix "out.0.bias") {"shape" [4]}
+                               (str prefix "out.2.weight") {"shape" [4 4 3 3]}
+                               (str prefix "out.2.bias") {"shape" [4]}}}
+        module (fn [kind id] {:kind kind :prefix (str prefix id ".")})
+        layout {:prefix prefix :complete? true
+                :input-blocks [{:index 0 :modules [(module :input-conv "input.0")]}
+                               {:index 1 :modules [(module :resblock "input.1")]}]
+                :middle-block [(module :resblock "middle.0")
+                               (module :spatial-transformer "middle.1")
+                               (module :resblock "middle.2")]
+                :output-blocks [{:index 0 :modules [(module :resblock "output.0")]}
+                                {:index 1 :modules [(module :resblock "output.1")]}]}
+        lower-var (ns-resolve 'comfyui.diffusion.architecture 'lower-unet-module)
+        spec (with-redefs-fn
+               {#'architecture/infer-unet-layout (constantly layout)
+                #'architecture/infer-sdxl-conditioning-layers (fn [_ _] nil)
+                lower-var (fn [_ m] {:op (:kind m) :source (:prefix m)})}
+               #(architecture/infer-unet-spec checkpoint*
+                                                {:family :stable-diffusion-v1}))
+        layers (:layers spec)]
+    (is (= :stable-diffusion-v1 (:architecture spec)))
+    (is (= [:skip-0 :skip-1] (mapv :name (filter #(= :save (:op %)) layers))))
+    (is (= [:skip-1 :skip-0]
+           (mapv :name (filter #(= :cat-saved (:op %)) layers))))
+    (is (= [:groupnorm :silu :conv2d] (mapv :op (take-last 3 layers))))))

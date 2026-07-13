@@ -212,6 +212,14 @@ indices, unknown modules, incomplete middle blocks, or missing final norm/conv
 tensors. Complete ResBlock catalogs lower to an executable compound operation
 covering both norms/convolutions, learned timestep/label projection, optional
 1×1 skip projection, and residual addition.
+Complete SpatialTransformer catalogs also lower automatically, including
+GroupNorm and proj-in/out, arbitrary contiguous transformer depth, self- and
+cross-attention, three LayerNorms, GEGLU feed-forward layers, and all residuals.
+When every module is complete, the loader assembles the whole UNet graph:
+encoder outputs are saved, decoder blocks concatenate them in reverse order,
+middle/down/up modules execute in checkpoint order, and final
+GroupNorm/SiLU/convolution produces epsilon. Any unlowerable module prevents an
+automatic denoiser instead of installing a partial graph.
 
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
@@ -221,9 +229,9 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-This is not yet a complete SD/SDXL render: automatic enumeration of every
-ResBlock/downsample/upsample/transformer block, complete
-production block/config mapping after family detection, additional
+This is not yet a verified production SD/SDXL render: the complete automatic
+UNet mapping still needs full-size validation against installed upstream
+checkpoints, and additional
 ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
 precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image

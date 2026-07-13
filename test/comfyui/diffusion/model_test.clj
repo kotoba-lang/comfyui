@@ -143,3 +143,51 @@
     (is (= (:shape sample) (:shape output-a)))
     (is (every? #(Double/isFinite %) (arr/->vec output-a)))
     (is (not= (arr/->vec output-a) (arr/->vec output-b)))))
+
+(deftest complete-spatial-transformer-self-cross-geglu-executes
+  (let [identity2 (arr/from-vec backend (identity-values 2 2 0.2) [2 2])
+        zero2 (arr/zeros backend [2]) one2 (arr/from-vec backend [1 1] [2])
+        conv-id (arr/from-vec backend [0.5 0 0 0.5] [2 2 1 1])
+        attention (fn [prefix]
+                    {(str prefix ".q") identity2 (str prefix ".k") identity2
+                     (str prefix ".v") identity2 (str prefix ".o") identity2
+                     (str prefix ".ob") zero2})
+        arrays (merge {"gn.w" one2 "gn.b" zero2 "pin.w" conv-id "pin.b" zero2
+                       "pout.w" conv-id "pout.b" zero2
+                       "n1.w" one2 "n1.b" zero2 "n2.w" one2 "n2.b" zero2
+                       "n3.w" one2 "n3.b" zero2
+                       "ff.in.w" (arr/from-vec backend [0.4 0.1, -0.2 0.3,
+                                                         0.5 -0.1, 0.2 0.4] [4 2])
+                       "ff.in.b" (arr/zeros backend [4])
+                       "ff.out.w" identity2 "ff.out.b" zero2}
+                      (attention "self") (attention "cross"))
+        attn-spec (fn [prefix]
+                    {:query-weight (str prefix ".q") :key-weight (str prefix ".k")
+                     :value-weight (str prefix ".v") :output-weight (str prefix ".o")
+                     :output-bias (str prefix ".ob")})
+        component {:comfyui/read-tensor (fn [_ name] (get arrays name))}
+        spec {:layers
+              [{:op :spatial-transformer :groups 1
+                :norm-weight "gn.w" :norm-bias "gn.b"
+                :proj-in-weight "pin.w" :proj-in-bias "pin.b"
+                :proj-out-weight "pout.w" :proj-out-bias "pout.b"
+                :blocks [{:heads 1
+                          :norm1-weight "n1.w" :norm1-bias "n1.b"
+                          :self-attention (attn-spec "self")
+                          :norm2-weight "n2.w" :norm2-bias "n2.b"
+                          :cross-attention (attn-spec "cross")
+                          :norm3-weight "n3.w" :norm3-bias "n3.b"
+                          :feed-forward {:project-weight "ff.in.w"
+                                         :project-bias "ff.in.b"
+                                         :output-weight "ff.out.w"
+                                         :output-bias "ff.out.b"}}]}]}
+        denoise (model/compile-denoiser component backend spec)
+        sample (arr/from-vec backend (mapv #(- (* 0.1 %) 0.3) (range 8)) [1 2 2 2])
+        condition-a {:tensor (arr/from-vec backend [0.2 -0.1, 0.4 0.3, -0.2 0.5]
+                                                   [1 3 2])}
+        condition-b {:tensor (arr/from-vec backend [1 0, 0 1, -1 0.5] [1 3 2])}
+        output-a (denoise sample 0 condition-a)
+        output-b (denoise sample 0 condition-b)]
+    (is (= (:shape sample) (:shape output-a)))
+    (is (every? #(Double/isFinite %) (arr/->vec output-a)))
+    (is (not= (arr/->vec output-a) (arr/->vec output-b)))))

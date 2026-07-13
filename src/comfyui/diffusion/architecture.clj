@@ -197,6 +197,136 @@
         (cond-> layer
           (first skip-present) (assoc :skip-weight skip-weight :skip-bias skip-bias))))))
 
+(defn- attention-spec [names base]
+  (let [optional #(let [name (str base %)] (when (contains? names name) name))]
+    {:query-weight (str base "to_q.weight") :query-bias (optional "to_q.bias")
+     :key-weight (str base "to_k.weight") :key-bias (optional "to_k.bias")
+     :value-weight (str base "to_v.weight") :value-bias (optional "to_v.bias")
+     :output-weight (str base "to_out.0.weight")
+     :output-bias (optional "to_out.0.bias")}))
+
+(defn infer-spatial-transformer-layer
+  "Lower a complete CompVis SpatialTransformer module, including every
+  contiguous BasicTransformerBlock, to the executable graph vocabulary."
+  [checkpoint {:keys [kind prefix]}]
+  (when (= :spatial-transformer kind)
+    (let [names (set (safe/tensor-names checkpoint))
+          block-pattern (re-pattern
+                         (str "^" (Pattern/quote (str prefix "transformer_blocks."))
+                              "(\\d+)\\.norm1\\.weight$"))
+          indices (indexed-values names block-pattern 1)
+          contiguous? (= indices (vec (range (count indices))))
+          blocks
+          (mapv
+           (fn [index]
+             (let [base (str prefix "transformer_blocks." index ".")
+                   q-shape (shape-at checkpoint (str base "attn1.to_q.weight"))
+                   hidden (first q-shape)
+                   heads (when (and hidden (zero? (mod (long hidden) 64)))
+                           (quot (long hidden) 64))]
+               {:heads heads
+                :norm1-weight (str base "norm1.weight") :norm1-bias (str base "norm1.bias")
+                :self-attention (attention-spec names (str base "attn1."))
+                :norm2-weight (str base "norm2.weight") :norm2-bias (str base "norm2.bias")
+                :cross-attention (attention-spec names (str base "attn2."))
+                :norm3-weight (str base "norm3.weight") :norm3-bias (str base "norm3.bias")
+                :feed-forward {:project-weight (str base "ff.net.0.proj.weight")
+                               :project-bias (str base "ff.net.0.proj.bias")
+                               :output-weight (str base "ff.net.2.weight")
+                               :output-bias (str base "ff.net.2.bias")}}))
+           indices)
+          proj-in (str prefix "proj_in.weight")
+          proj-out (str prefix "proj_out.weight")
+          layer {:op :spatial-transformer :groups 32
+                 :norm-weight (str prefix "norm.weight")
+                 :norm-bias (str prefix "norm.bias")
+                 :proj-in-weight proj-in :proj-in-bias (str prefix "proj_in.bias")
+                 :proj-out-weight proj-out :proj-out-bias (str prefix "proj_out.bias")
+                 :linear-projection? (= 2 (count (shape-at checkpoint proj-in)))
+                 :blocks blocks}
+          required
+          (concat ((juxt :norm-weight :norm-bias :proj-in-weight :proj-in-bias
+                         :proj-out-weight :proj-out-bias) layer)
+                  (mapcat
+                   (fn [block]
+                     (concat ((juxt :norm1-weight :norm1-bias :norm2-weight :norm2-bias
+                                    :norm3-weight :norm3-bias) block)
+                             (remove nil? (vals (:self-attention block)))
+                             (remove nil? (vals (:cross-attention block)))
+                             (vals (:feed-forward block))))
+                   blocks))]
+      (when (and contiguous? (seq blocks) (every? #(pos-int? (:heads %)) blocks)
+                 (every? names required))
+        layer))))
+
+(defn- lower-unet-module [checkpoint module]
+  (case (:kind module)
+    :resblock (infer-resblock-layer checkpoint module)
+    :spatial-transformer (infer-spatial-transformer-layer checkpoint module)
+    :downsample (let [weight (str (:prefix module) "op.weight")
+                      bias (str (:prefix module) "op.bias")
+                      names (set (safe/tensor-names checkpoint))]
+                  (when (and (names weight) (names bias))
+                    {:op :conv2d :weight weight :bias bias :stride 2 :padding 1}))
+    :upsample (let [weight (str (:prefix module) "conv.weight")
+                    bias (str (:prefix module) "conv.bias")
+                    names (set (safe/tensor-names checkpoint))]
+                (when (and (names weight) (names bias))
+                  [{:op :upsample :scale-factor 2}
+                   {:op :conv2d :weight weight :bias bias :padding 1}]))
+    nil))
+
+(defn- lower-modules [checkpoint modules]
+  (let [lowered (mapv #(lower-unet-module checkpoint %) modules)]
+    (when (every? some? lowered)
+      (vec (mapcat #(if (vector? %) % [%]) lowered)))))
+
+(defn infer-unet-spec
+  "Build a complete executable CompVis UNet graph from a validated topology.
+  Returns nil rather than a partial graph when any module catalog is missing."
+  [checkpoint architecture-info]
+  (let [{:keys [prefix input-blocks middle-block output-blocks complete?]}
+        (infer-unet-layout checkpoint)
+        names (set (safe/tensor-names checkpoint))]
+    (when complete?
+      (let [conditioning (or (infer-sdxl-conditioning-layers checkpoint architecture-info) [])
+            input-conv {:op :conv2d
+                        :weight (str prefix "input_blocks.0.0.weight")
+                        :bias (str prefix "input_blocks.0.0.bias") :padding 1}
+            input-valid? (every? names [(:weight input-conv) (:bias input-conv)])
+            encoder
+            (when input-valid?
+              (reduce
+               (fn [layers {:keys [index modules]}]
+                 (let [body (if (zero? index) [input-conv]
+                                (lower-modules checkpoint modules))]
+                   (when (and layers body)
+                     (into layers (concat body [{:op :save
+                                                 :name (keyword (str "skip-" index))}])))))
+               [] input-blocks))
+            middle (lower-modules checkpoint middle-block)
+            skip-indices (reverse (mapv :index input-blocks))
+            decoder
+            (reduce
+             (fn [layers [{:keys [modules]} skip-index]]
+               (let [body (lower-modules checkpoint modules)]
+                 (when (and layers body)
+                   (into layers
+                         (concat [{:op :cat-saved
+                                   :name (keyword (str "skip-" skip-index)) :axis 1}]
+                                 body)))))
+             [] (map vector output-blocks skip-indices))
+            final-layers [{:op :groupnorm :groups 32
+                           :weight (str prefix "out.0.weight")
+                           :bias (str prefix "out.0.bias")}
+                          {:op :silu}
+                          {:op :conv2d :weight (str prefix "out.2.weight")
+                           :bias (str prefix "out.2.bias") :padding 1}]]
+        (when (and encoder middle decoder
+                   (= (count output-blocks) (count input-blocks)))
+          {:architecture (:family architecture-info)
+           :layers (vec (concat conditioning encoder middle decoder final-layers))})))))
+
 (defn- infer-hf-clip-spec [checkpoint names root]
     (let [token-name (str root "embeddings.token_embedding.weight")
           position-name (str root "embeddings.position_embedding.weight")

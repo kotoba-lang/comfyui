@@ -88,13 +88,15 @@
                 model-component (component checkpoint :model
                                            ["model.diffusion_model."
                                             "diffusion_model." "unet."])
-                spec (if (fn? model-spec)
-                       (model-spec ckpt_name checkpoint) model-spec)
                 architecture-info (architecture/infer checkpoint)
+                configured-spec (if (fn? model-spec)
+                                  (model-spec ckpt_name checkpoint) model-spec)
+                spec (or configured-spec
+                         (architecture/infer-unet-spec checkpoint architecture-info))
                 conditioning-layers (architecture/infer-sdxl-conditioning-layers
                                      checkpoint architecture-info)
                 effective-spec
-                (if (and spec conditioning-layers
+                (if (and configured-spec conditioning-layers
                          (not-any? #(= :timestep-vector (:op %)) (:layers spec)))
                   (update spec :layers #(into (vec conditioning-layers) %))
                   spec)
