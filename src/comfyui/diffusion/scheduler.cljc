@@ -18,6 +18,22 @@
                (* (/ i (double (dec steps))) (- (double beta-end) beta-start))))
           (range steps))))
 
+(defn scaled-linear-betas
+  "Diffusers/CompVis `scaled_linear`: interpolate square roots of the beta
+  endpoints, then square each value. Stable Diffusion checkpoints use this
+  schedule rather than direct linear beta interpolation."
+  [steps beta-start beta-end]
+  (when-not (and (pos-int? steps) (< 0 beta-start beta-end 1))
+    (throw (ex-info "invalid scaled-linear beta schedule"
+                    {:steps steps :beta-start beta-start :beta-end beta-end})))
+  (let [start (Math/sqrt beta-start) end (Math/sqrt beta-end)]
+    (if (= steps 1)
+      [(double beta-start)]
+      (mapv (fn [i]
+              (let [value (+ start (* (/ i (double (dec steps))) (- end start)))]
+                (* value value)))
+            (range steps)))))
+
 (defn alphas-cumprod [betas]
   (loop [remaining betas product 1.0 out []]
     (if-let [beta (first remaining)]

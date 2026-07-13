@@ -3,6 +3,7 @@
   contracts, every node in this pack performs real work: checkpoint catalog
   loading, latent allocation, or a DDIM transition."
   (:require [clojure.string :as str]
+            [comfyui.diffusion.architecture :as architecture]
             [comfyui.diffusion.model :as diffusion-model]
             [comfyui.diffusion.scheduler :as scheduler]
             [comfyui.safetensors :as safe]
@@ -86,12 +87,16 @@
                                             "diffusion_model." "unet."])
                 spec (if (fn? model-spec)
                        (model-spec ckpt_name checkpoint) model-spec)
-                alphas (if (fn? alphas-cumprod)
-                         (alphas-cumprod ckpt_name checkpoint) alphas-cumprod)
+                architecture-info (architecture/infer checkpoint)
+                configured-alphas (if (fn? alphas-cumprod)
+                                    (alphas-cumprod ckpt_name checkpoint)
+                                    alphas-cumprod)
+                alphas (or configured-alphas
+                           (architecture/default-alphas-cumprod architecture-info))
                 decoder-spec (if (fn? vae-spec)
                                (vae-spec ckpt_name checkpoint) vae-spec)
                 executable-model
-                (cond-> model-component
+                (cond-> (assoc model-component :comfyui/architecture architecture-info)
                   spec (assoc :comfyui/model-spec spec
                               :comfyui/denoise
                               (diffusion-model/compile-denoiser
