@@ -180,3 +180,90 @@
       :executed (vec (keep #(when-not (:cached? %) (:node %)) (:execs run)))
       :cached (vec (keep #(when (:cached? %) (:node %)) (:execs run)))
       :run-id run-id})))
+
+;; ───────────────────────── async execution (ADR-2607131500) ─────────────────
+
+#?(:cljs
+   (do
+     (defn- ->p [x] (if (instance? js/Promise x) x (js/Promise.resolve x)))
+
+     (defn execute-async
+       "Async twin of `execute`, for a registry whose `:fn` may return a JS
+       Promise (e.g. `comfyui.nodes.toy-diffusion/pack-metal`, wired to
+       `num.tensor-async` for real Metal execution via `num.deno-gpu`).
+
+       Reuses `execute`'s validation / topological-order / content-addressed
+       cache-key logic UNCHANGED (all pure) — only the per-node `:fn`
+       invocation is Promise-aware, sequenced via `.then` so a node only
+       runs once every upstream dependency it reads has actually resolved
+       (topological order, same as `execute`, just async-sequenced instead
+       of a plain synchronous `reduce`).
+
+       `execute` itself is untouched by this addition — a registry with an
+       ordinary synchronous `:fn` works identically either way; this exists
+       for registries that specifically need to await a Promise-returning
+       `:fn`, not as a replacement. CLJS-only (JS Promises).
+
+       Returns `Promise<{:results .. :executed .. :cached .. :run-id ..}>`
+       (same shape `execute` returns synchronously)."
+       ([ctx workflow] (execute-async ctx workflow {}))
+       ([{:keys [registry cache history-conn db-api on-event]
+          :or {db-api db/api}}
+         workflow
+         {:keys [targets]}]
+        (let [{:keys [valid?] :as v} (wf/validate registry workflow)
+              _ (when-not valid? (throw (ex-info "Invalid workflow" v)))
+              targets (or (not-empty (vec targets))
+                          (not-empty (wf/output-nodes registry workflow))
+                          (vec (keys workflow)))
+              needed (reduce into #{} (map #(wf/ancestors-of workflow %) targets))
+              order (filter needed (wf/topo-sort workflow))]
+          (.then
+           (reduce
+            (fn [acc-promise id]
+              (.then acc-promise
+                     (fn [{:keys [keys results execs]}]
+                       (let [{:keys [class_type inputs]} (get workflow id)
+                             t (node/get-type registry class_type)
+                             k (cache-key workflow keys id)
+                             hit (when cache (-cache-get cache k))]
+                         (if hit
+                           (do (when on-event (on-event {:node id :class class_type :cached? true}))
+                               (->p {:keys (assoc keys id k)
+                                     :results (assoc results id hit)
+                                     :execs (conj execs {:node id :class class_type :key k
+                                                         :cached? true :output hit})}))
+                           (let [args (as-> inputs m
+                                        (into {} (map (fn [[in v]]
+                                                        [in (if (wf/link? v)
+                                                              (get-in results [(first v) (second v)])
+                                                              v)]))
+                                              m)
+                                        (merge (into {} (keep (fn [[in spec]]
+                                                                (when (contains? spec :default)
+                                                                  [in (:default spec)]))
+                                                              (:inputs t)))
+                                               m))]
+                             (.then (->p ((:fn t) args))
+                                    (fn [r]
+                                      (let [outputs (if (vector? r) r [r])]
+                                        (when cache (-cache-put! cache k outputs))
+                                        (when on-event (on-event {:node id :class class_type :cached? false}))
+                                        {:keys (assoc keys id k)
+                                         :results (assoc results id outputs)
+                                         :execs (conj execs {:node id :class class_type :key k
+                                                             :cached? false :output outputs})})))))))))
+            (->p {:keys {} :results {} :execs []})
+            order)
+           (fn [run]
+             (let [run-id (when history-conn (record-run! db-api history-conn run))]
+               {:results (:results run)
+                :executed (vec (keep #(when-not (:cached? %) (:node %)) (:execs run)))
+                :cached (vec (keep #(when (:cached? %) (:node %)) (:execs run)))
+                :run-id run-id})))))))
+
+   :clj
+   (defn execute-async
+     ([_ctx _workflow] (execute-async _ctx _workflow {}))
+     ([_ctx _workflow _opts]
+      (throw (ex-info "comfyui.exec/execute-async requires ClojureScript compiled for a Deno/WebGPU host." {})))))

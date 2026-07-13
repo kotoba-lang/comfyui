@@ -19,13 +19,30 @@
                       ;; comfyui.nodes.toy-diffusion-test (ADR-2607131500
                       ;; Phase 1) — a real conv2d+relu+attention node :fn,
                       ;; dispatched through the real exec.cljc executor.
+                      ;; Pinned to the commit that added num.tensor-async
+                      ;; (toy_diffusion.cljc requires it unconditionally now
+                      ;; — the :clj branch is a real, loadable throwing stub,
+                      ;; not a compile failure, see num.tensor-async's own
+                      ;; docstring).
                       io.github.kotoba-lang/num
-                      {:git/sha "d5a58654028f705f6df3338cc1c99511ee8e44ea"}}
+                      {:git/sha "668fc55f6ff8d4afd38313d19e9cbdee83487371"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
   ;; local checkout for workspace development (orgs/kotoba-lang/*)
   :dev {:override-deps {io.github.kotoba-lang/langchain
                         {:local/root "../langchain"}}}
+  ;; ADR-2607131500 follow-up: comfyui.nodes.toy-diffusion's Metal-backed
+  ;; twin (ToyDiffusionStepMetal / execute-async), on real Metal, cross-
+  ;; checked against the CPU-sync ToyDiffusionStep node's result.
+  ;;   clojure -M:toy-diffusion-metal-verify && deno run --allow-all target/toy-diffusion-metal-verify.cjs
+  :toy-diffusion-metal-verify
+  {:extra-paths ["test"]
+   :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}
+                io.github.kotoba-lang/num
+                {:git/sha "668fc55f6ff8d4afd38313d19e9cbdee83487371"}}
+   :main-opts ["-m" "cljs.main"
+               "-co" "{:optimizations :simple :target :nodejs :main comfyui.nodes.toy-diffusion-metal-verify :output-to \"target/toy-diffusion-metal-verify.cjs\"}"
+               "-c" "comfyui.nodes.toy-diffusion-metal-verify"]}
   ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
   :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
