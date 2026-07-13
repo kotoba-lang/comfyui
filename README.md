@@ -237,7 +237,12 @@ When a CLIP graph spec is present, it additionally executes checkpoint-backed
 token/position embeddings, pre-LayerNorm causal multi-head self-attention,
 QuickGELU MLP/residual blocks, and final LayerNorm, returning both
 `[1,77,hidden]` conditioning and pooled embeddings. Transformer tensors are
-loaded once and reused across repeated prompt encodes.
+loaded once and reused across repeated prompt encodes. Token gather plus
+position addition, LayerNorm, QuickGELU, causal multi-head attention, fused-QKV
+slicing, and EOS pooling all stay device-native on Metal. Each block releases
+its normalized/projection/MLP activations at final use; the live verifier runs a
+multi-layer encoder against the CPU oracle and returns to its pre-encode GPU
+buffer baseline after outputs and cached weights are released.
 For recognized SD1/SD2 checkpoints, the loader derives this CLIP graph
 automatically from the standard `CLIPTextModel` tensor catalog: contiguous
 encoder layer count, hidden width/head count, both norms, Q/K/V/out projections,
@@ -246,8 +251,10 @@ returns no executable encoder instead of silently constructing a partial model.
 For SDXL checkpoints containing two complete HF `CLIPTextModel` catalogs, both
 encoders are inferred and executed automatically. Their per-token features are
 concatenated on the hidden dimension (for example 768 + 1280 = 2048), while the
-second encoder supplies pooled conditioning; individual encoder results remain
-available as `:clip-l` and `:clip-g` for audit/debugging.
+second encoder supplies pooled conditioning. Per-encoder token tensors and the
+unused CLIP-L pool are released after concatenation by default; callers that
+intentionally own both complete diagnostic results can set
+`:retain-encoder-outputs? true` to receive `:clip-l` and `:clip-g`.
 Native SDXL OpenCLIP catalogs are also recognized: `transformer.resblocks.*`,
 fused `attn.in_proj_weight/bias`, `ln_final`, and `text_projection` are mapped
 automatically. Fused projections are split into Q/K/V, CLIP-G uses its

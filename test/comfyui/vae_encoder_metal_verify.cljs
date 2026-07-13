@@ -3,6 +3,7 @@
   latent scale stay device-native on Deno WebGPU backed by Apple Metal."
   (:require [comfyui.diffusion.model :as model]
             [comfyui.diffusion.scheduler :as scheduler]
+            [comfyui.clip.encoder :as clip]
             [num.array :as arr]
             [num.cpu :as cpu]
             [num.deno-gpu :as dg]
@@ -47,6 +48,41 @@
   (mapv (fn [index]
           (if (= (quot index size) (mod index size)) scale 0.0))
         (range (* size size))))
+
+(defn- clip-run [backend]
+  (let [matrix (fn [rows columns f]
+                 (arr/from-vec backend
+                               (vec (for [row (range rows) column (range columns)]
+                                      (double (f row column))))
+                               [rows columns]))
+        identity (matrix 4 4 #(if (= %1 %2) 1.0 0.0))
+        zeros (arr/zeros backend [4])
+        ones (arr/from-vec backend [1.0 1.0 1.0 1.0] [4])
+        arrays {"token" (matrix 8 4 #(* 0.05 (+ 1 (* %1 4) %2)))
+                "position" (matrix 5 4 #(* 0.01 (+ %1 %2)))
+                "n1.w" ones "n1.b" zeros
+                "q.w" identity "q.b" zeros "k.w" identity "k.b" zeros
+                "v.w" identity "v.b" zeros "o.w" identity "o.b" zeros
+                "n2.w" ones "n2.b" zeros
+                "fc1.w" (matrix 8 4 #(if (= (mod %1 4) %2) 0.5 0.0))
+                "fc1.b" (arr/zeros backend [8])
+                "fc2.w" (matrix 4 8 #(if (= (mod %2 4) %1) 0.25 0.0))
+                "fc2.b" zeros "final.w" ones "final.b" zeros}
+        layer {:norm1-weight "n1.w" :norm1-bias "n1.b"
+               :query-weight "q.w" :query-bias "q.b"
+               :key-weight "k.w" :key-bias "k.b"
+               :value-weight "v.w" :value-bias "v.b"
+               :output-weight "o.w" :output-bias "o.b"
+               :norm2-weight "n2.w" :norm2-bias "n2.b"
+               :fc1-weight "fc1.w" :fc1-bias "fc1.b"
+               :fc2-weight "fc2.w" :fc2-bias "fc2.b"}
+        encode (clip/compile-encoder
+                {:comfyui/read-tensor (fn [_ name] (get arrays name))} backend
+                {:token-embedding "token" :position-embedding "position"
+                 :layers [layer layer] :heads 2
+                 :final-norm-weight "final.w" :final-norm-bias "final.b"})
+        result (encode {:input-ids [1 2 3 4 0] :attention-mask [1 1 1 1 0]})]
+    {:result result :owned (vals arrays)}))
 
 (defn- vae-attention [backend]
   (let [matrix (arr/from-vec backend (identity-values 2 0.5) [2 2])
@@ -167,6 +203,9 @@
         expected-batched (arr/->vec (broadcast-batched-matmul cpu-backend))
         expected-vae-attention (arr/->vec (vae-attention cpu-backend))
         expected-cross-attention (arr/->vec (legacy-cross-attention cpu-backend))
+        expected-clip-run (clip-run cpu-backend)
+        expected-clip [(arr/->vec (get-in expected-clip-run [:result :tensor]))
+                       (arr/->vec (get-in expected-clip-run [:result :pooled]))]
         expected-sampler-runs (mapv #(sampler-run cpu-backend %) sampler-names)
         expected-samplers (mapv #(arr/->vec (:output %)) expected-sampler-runs)]
     (-> (dg/request-device)
@@ -175,6 +214,21 @@
            (let [gpu (dg/backend request)
                  output (compile-and-run gpu)
                  [gpu-nchw gpu-image] (image-conversions gpu)
+                 clip-baseline (dg/backend-stats gpu)
+                 gpu-clip-run (clip-run gpu)
+                 clip-promise
+                 (js/Promise.all
+                  #js [(arr/->vec (get-in gpu-clip-run [:result :tensor]))
+                       (arr/->vec (get-in gpu-clip-run [:result :pooled]))])
+                 _ (arr/release-all!
+                    (concat (:owned gpu-clip-run)
+                            [(get-in gpu-clip-run [:result :tensor])
+                             (get-in gpu-clip-run [:result :pooled])]))
+                 clip-after (dg/backend-stats gpu)
+                 clip-lifetime-ok? (and (= (:live-buffers clip-baseline)
+                                           (:live-buffers clip-after))
+                                        (= (:live-bytes clip-baseline)
+                                           (:live-bytes clip-after)))
                  sampler-baseline (dg/backend-stats gpu)
                  gpu-sampler-runs (mapv #(sampler-run gpu %) sampler-names)
                  sampler-promise
@@ -196,7 +250,7 @@
                     (arr/->vec (broadcast-batched-matmul gpu))
                     (arr/->vec (vae-attention gpu))
                     (arr/->vec (legacy-cross-attention gpu))
-                    sampler-promise])
+                    sampler-promise clip-promise])
               (fn [results]
                 (let [actual (aget results 0)
                       actual-denoise (aget results 1)
@@ -207,6 +261,7 @@
                       actual-vae-attention (aget results 6)
                       actual-cross-attention (aget results 7)
                       actual-samplers (vec (js/Array.from (aget results 8)))
+                      actual-clip (vec (js/Array.from (aget results 9)))
                       close? (fn [expected actual]
                                (and (= (count expected) (count actual))
                                     (every? true?
@@ -225,7 +280,9 @@
                            (close? expected-vae-attention actual-vae-attention)
                            (close? expected-cross-attention actual-cross-attention)
                            (every? true? (map close? expected-samplers actual-samplers))
-                           sampler-lifetime-ok?)
+                           sampler-lifetime-ok?
+                           (every? true? (map close? expected-clip actual-clip))
+                           clip-lifetime-ok?)
                     (throw
                      (ex-info "Metal liveness graphs differ from CPU"
                               {:shape (:shape output)
@@ -246,9 +303,11 @@
                                :actual-cross-attention actual-cross-attention
                                :expected-samplers expected-samplers
                                :actual-samplers actual-samplers
+                               :expected-clip expected-clip :actual-clip actual-clip
+                               :clip-baseline clip-baseline :clip-after clip-after
                                :sampler-baseline sampler-baseline
                                :sampler-after sampler-after})))
-                  (println "OK VAE + SpatialTransformer + four sampler graphs match CPU and release to baseline with"
+                  (println "OK CLIP + VAE + SpatialTransformer + four samplers match CPU and release to baseline with"
                            "GPUBuffer.destroy on"
                            (dg/adapter-description request)))))))))
         (.catch
