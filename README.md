@@ -453,6 +453,20 @@ GPU buffers, with PNG sizes from 847 to 859 bytes. DDIM additionally retains its
 pinned PyTorch trajectory comparison; the scheduler's dedicated live Metal gate
 provides CPU parity for Euler/ancestral/DPM++ transitions.
 
+This path now has an end-to-end wall-clock measurement, not a queue-submission
+timing. The interval starts after WebGPU device negotiation and ends only after
+lazy tensor reads, pipeline compilation, seven-node execution, final GPU
+readback, zlib compression, and PNG write have completed. Five fresh Deno
+processes on Apple M4 measured F32 DDIM at 456.876–502.047 ms (mean 481.715 ms,
+median 480.645 ms). The independent JVM CPU pipeline took 55.765 s for the same
+fixed two-step graph, roughly 116× the Metal interval. F16 checkpoint expansion
+measured 557.774–601.661 ms (mean 581.062 ms): it halves checkpoint traffic but
+is slower for this tiny model because 458 separate half-expansion dispatches
+dominate. Single fresh-process measurements for the other six F32 combinations
+were 488.312–541.193 ms. These are tiny 16×16 output measurements with warm OS
+file cache, not evidence for 512×512 production throughput; full-size profiling
+and kernel fusion remain required.
+
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
 upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,

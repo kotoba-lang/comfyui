@@ -73,7 +73,8 @@
                   "6" {:class_type "VAEDecode"
                        :inputs {:samples ["5" 0] :vae ["1" 2]}}
                   "7" {:class_type "SaveImage"
-                       :inputs {:images ["6" 0] :filename_prefix "metal_graph"}}}]
+                       :inputs {:images ["6" 0] :filename_prefix "metal_graph"}}}
+                 started (.now js/performance)]
              (-> (exec/execute-async
                   {:registry registry :on-event #(swap! events conj %)} workflow)
                  (.then
@@ -101,6 +102,7 @@
                        (fn [values]
                          (let [latent-values (aget values 0)
                                image-values (aget values 1)
+                               elapsed-ms (- (.now js/performance) started)
                                stats (dg/backend-stats backend)]
                            (when-not
                                (and (= ["1" "4" "2" "3" "5" "6" "7"]
@@ -110,6 +112,7 @@
                                     (> (.-byteLength png-bytes) 500)
                                     (or (not direct?)
                                         (every? pos? (map :direct-uploads reader-stats)))
+                                    (pos? elapsed-ms)
                                     (= 2 (count (:history sample-result)))
                                     (every? #(js/Number.isFinite %) latent-values)
                                     (every? #(js/Number.isFinite %) image-values)
@@ -135,6 +138,7 @@
                                     "peak-bytes" (:peak-live-bytes stats)
                                     "checkpoint-dtype" (if f16? "F16" "F32")
                                     "sampler" sampler-name "scheduler" scheduler-name
+                                    "elapsed-ms" (.toFixed elapsed-ms 3)
                                     "output" path)))))))))))
         (.catch (fn [error]
                   (println "ERROR:" (or (.-stack error) (str error)))
