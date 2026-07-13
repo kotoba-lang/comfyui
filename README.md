@@ -195,6 +195,10 @@ fused `attn.in_proj_weight/bias`, `ln_final`, and `text_projection` are mapped
 automatically. Fused projections are split into Q/K/V, CLIP-G uses its
 penultimate transformer state, and pooled output is projected before entering
 the dual-conditioning result.
+The executable `CLIPTextEncodeSDXL` node carries original width/height, crop
+offset, and target width/height as the standard six time IDs alongside token
+conditioning and the projected pooled embedding. Invalid negative dimensions
+or a non-dual encoder result fail before sampling.
 
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
@@ -204,8 +208,8 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-This is not yet a complete SD/SDXL render: SDXL size/crop micro-conditioning
-and label-embedding execution, complete
+This is not yet a complete SD/SDXL render: SDXL label-embedding execution from
+pooled/time-ID conditioning, complete
 production block/config mapping after family detection, additional
 ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
 precision, and an installed real

@@ -138,7 +138,7 @@
     :inputs {:clip {:type "CLIP"}
              :text {:type "STRING" :multiline true}}
     :outputs [{:name "CONDITIONING" :type "CONDITIONING"}]
-    :fn (fn [{:keys [clip text]}]
+   :fn (fn [{:keys [clip text]}]
           (when-not (and (= :clip (:comfyui/component clip))
                          (fn? clip-tokenizer))
             (throw (ex-info "CLIPTextEncode requires a CLIP component and tokenizer"
@@ -146,6 +146,37 @@
           (let [tokenized (assoc (clip-tokenizer text) :clip clip :text text)
                 encode (:comfyui/encode clip)]
             [(if encode (encode tokenized) tokenized)]))}
+   {:type "CLIPTextEncodeSDXL"
+    :category "advanced/conditioning"
+    :inputs {:clip {:type "CLIP"}
+             :text {:type "STRING" :multiline true}
+             :width {:type "INT" :default 1024}
+             :height {:type "INT" :default 1024}
+             :crop_w {:type "INT" :default 0}
+             :crop_h {:type "INT" :default 0}
+             :target_width {:type "INT" :default 1024}
+             :target_height {:type "INT" :default 1024}}
+    :outputs [{:name "CONDITIONING" :type "CONDITIONING"}]
+    :fn (fn [{:keys [clip text width height crop_w crop_h
+                     target_width target_height]}]
+          (when-not (and (= :clip (:comfyui/component clip))
+                         (fn? clip-tokenizer) (:comfyui/encode clip))
+            (throw (ex-info "CLIPTextEncodeSDXL requires executable dual CLIP"
+                            {:clip-keys (keys clip)})))
+          (let [dimensions [width height crop_w crop_h target_width target_height]]
+            (when-not (every? #(and (integer? %) (not (neg? %))) dimensions)
+              (throw (ex-info "SDXL dimensions/crops must be non-negative integers"
+                              {:time-ids dimensions})))
+            (let [encoded ((:comfyui/encode clip)
+                           (assoc (clip-tokenizer text) :clip clip :text text))]
+              (when-not (and (:tensor encoded) (:pooled encoded))
+                (throw (ex-info "SDXL dual CLIP must return tensor and pooled output"
+                                {:result-keys (keys encoded)})))
+              [(assoc encoded
+                      :time-ids dimensions
+                      :original-size [width height]
+                      :crop [crop_w crop_h]
+                      :target-size [target_width target_height])])))}
    {:type "EmptyLatentImage"
     :category "latent"
     :inputs {:width {:type "INT" :default 512}

@@ -248,3 +248,24 @@
         (Files/deleteIfExists (.resolve output-dir "render_00000.png"))
         (Files/deleteIfExists output-dir)
         (Files/deleteIfExists path)))))
+
+(deftest sdxl-text-node-emits-pooled-and-size-conditioning
+  (let [tokenizer (fn [_] {:input-ids [1 2] :attention-mask [1 1]})
+        tensor (arr/from-vec backend (range 12) [1 2 6])
+        pooled (arr/from-vec backend [1 2 3 4] [1 4])
+        clip {:comfyui/component :clip
+              :comfyui/encode (fn [tokens]
+                                (assoc tokens :tensor tensor :pooled pooled))}
+        definition (first (filter #(= "CLIPTextEncodeSDXL" (:type %))
+                                  (runtime/pack {:backend backend
+                                                 :clip-tokenizer tokenizer})))
+        [conditioning] ((:fn definition)
+                        {:clip clip :text "castle" :width 1216 :height 832
+                         :crop_w 32 :crop_h 0
+                         :target_width 1024 :target_height 1024})]
+    (is (= [1216 832 32 0 1024 1024] (:time-ids conditioning)))
+    (is (= [1216 832] (:original-size conditioning)))
+    (is (= [32 0] (:crop conditioning)))
+    (is (= [1024 1024] (:target-size conditioning)))
+    (is (identical? tensor (:tensor conditioning)))
+    (is (identical? pooled (:pooled conditioning)))))
