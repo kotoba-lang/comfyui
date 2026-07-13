@@ -185,10 +185,10 @@
     :outputs [{:name "LATENT" :type "LATENT"}]
     :fn (fn [{:keys [model positive negative latent_image seed steps cfg
                      sampler_name scheduler denoise]}]
-          (when-not (and (contains? #{"ddim" "euler"} sampler_name)
+          (when-not (and (contains? #{"ddim" "euler" "euler_ancestral"} sampler_name)
                          (= "normal" scheduler)
                          (= 1.0 (double denoise)))
-            (throw (ex-info "runtime KSampler supports ddim/euler with normal/full-denoise"
+            (throw (ex-info "runtime KSampler supports ddim/euler/euler_ancestral with normal/full-denoise"
                             {:sampler-name sampler_name :scheduler scheduler :denoise denoise})))
           (let [denoise-fn (:comfyui/denoise model)
                 alphas (:comfyui/alphas-cumprod model)
@@ -212,5 +212,8 @@
                  :eta 0.0 :noise-fn noise-fn}
                 result (case sampler_name
                          "ddim" (scheduler/ddim-sample sampler-args)
-                         "euler" (scheduler/euler-sample sampler-args))]
+                         "euler" (scheduler/euler-sample sampler-args)
+                         "euler_ancestral"
+                         (scheduler/euler-ancestral-sample
+                          (assoc sampler-args :eta 1.0)))]
             [(:sample result)]))}])

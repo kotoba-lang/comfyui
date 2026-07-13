@@ -130,10 +130,12 @@ execution while retaining the upstream class names and wire types:
   deterministic path and eta/noise variance path, inside `comfyui.exec`.
 - `KSampler` selects descending training timesteps and repeatedly invokes an
   executable checkpoint model with positive/negative conditioning, applies
-  classifier-free guidance, and advances the latent through DDIM or Euler
-  discrete. Euler converts cumulative alpha to sigma, scales model input, and
-  integrates the epsilon ODE through final sigma zero. The current executable
-  subset is `ddim|euler` + `normal` + full denoise; unsupported sampler
+  classifier-free guidance, and advances the latent through DDIM, Euler
+  discrete, or Euler ancestral. Euler converts cumulative alpha to sigma,
+  scales model input, and integrates the epsilon ODE through final sigma zero;
+  the ancestral variant splits each target into sigma-down plus seeded
+  sigma-up noise. The current executable subset is
+  `ddim|euler|euler_ancestral` + `normal` + full denoise; unsupported sampler
   combinations fail explicitly instead of silently changing algorithms.
 
 ```clojure

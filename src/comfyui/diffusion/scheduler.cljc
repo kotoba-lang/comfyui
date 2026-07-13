@@ -159,3 +159,46 @@
         (when on-step (on-step event))
         (recur next-sample (next remaining) (conj history event)))
       {:sample current :history history})))
+
+(defn euler-ancestral-sample
+  "Euler ancestral sampling. Each transition decomposes target sigma into a
+  deterministic `sigma-down` step plus fresh noise at `sigma-up`; `eta=1`
+  matches the standard ancestral schedule."
+  [{:keys [sample alphas timesteps denoise-fn positive negative cfg eta noise-fn on-step]
+    :or {cfg 1.0 eta 1.0}}]
+  (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn)
+                 (<= 0.0 eta))
+    (throw (ex-info "Euler ancestral sampler received invalid arguments" {:eta eta})))
+  (loop [current sample remaining (seq timesteps) history []]
+    (if-let [timestep (first remaining)]
+      (let [next-timestep (second remaining)
+            sigma (alpha->sigma (double (nth alphas timestep)))
+            sigma-next (if (some? next-timestep)
+                         (alpha->sigma (double (nth alphas next-timestep))) 0.0)
+            model-input (scale current (/ 1.0 (Math/sqrt (+ 1.0 (* sigma sigma)))))
+            epsilon (classifier-free-guidance
+                     (denoise-fn model-input timestep negative)
+                     (denoise-fn model-input timestep positive) cfg)
+            sigma-up (if (zero? sigma-next)
+                       0.0
+                       (min sigma-next
+                            (* eta
+                               (Math/sqrt
+                                (max 0.0
+                                     (/ (* sigma-next sigma-next
+                                           (- (* sigma sigma)
+                                              (* sigma-next sigma-next)))
+                                        (* sigma sigma)))))))
+            sigma-down (Math/sqrt (max 0.0 (- (* sigma-next sigma-next)
+                                                (* sigma-up sigma-up))))
+            mean (t/add current (scale epsilon (- sigma-down sigma)))
+            noise (when (pos? sigma-up)
+                    (when-not noise-fn
+                      (throw (ex-info "Euler ancestral sampling requires noise-fn" {})))
+                    (noise-fn (:shape current) timestep))
+            next-sample (if noise (t/add mean (scale noise sigma-up)) mean)
+            event {:timestep timestep :sigma sigma :sigma-next sigma-next
+                   :sigma-up sigma-up :sigma-down sigma-down}]
+        (when on-step (on-step event))
+        (recur next-sample (next remaining) (conj history event)))
+      {:sample current :history history})))

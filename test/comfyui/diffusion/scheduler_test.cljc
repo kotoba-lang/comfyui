@@ -85,3 +85,21 @@
     (is (= [2 1] (mapv :timestep @events)))
     (is (zero? (:sigma-next (last @events))))
     (is (approx? expected (first (arr/->vec (:sample result)))))))
+
+(deftest euler-ancestral-splits-deterministic-and-noise-sigmas
+  (let [sample (arr/from-vec backend [1.5] [1])
+        uncond (arr/from-vec backend [0.1] [1])
+        cond (arr/from-vec backend [0.2] [1])
+        events (atom [])
+        args {:sample sample :alphas [0.9 0.7 0.5] :timesteps [2 1]
+              :negative uncond :positive cond :cfg 2.0 :eta 1.0
+              :denoise-fn (fn [_ _ conditioning] conditioning)
+              :noise-fn (fn [shape _] (arr/from-vec backend [0.4] shape))
+              :on-step #(swap! events conj %)}
+        first-run (scheduler/euler-ancestral-sample args)
+        second-run (scheduler/euler-ancestral-sample (dissoc args :on-step))]
+    (is (pos? (:sigma-up (first @events))))
+    (is (zero? (:sigma-up (last @events))))
+    (is (every? #(<= 0.0 (:sigma-down %) (:sigma-next %)) @events))
+    (is (= (arr/->vec (:sample first-run))
+           (arr/->vec (:sample second-run))))))

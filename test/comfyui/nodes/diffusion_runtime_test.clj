@@ -121,10 +121,12 @@
                 (get-in (exec/execute {:registry registry} workflow)
                         [:results "sample" 0])))
         ddim (run "ddim")
-        euler (run "euler")]
-    (is (= [1 1 1 1] (:shape ddim) (:shape euler)))
+        euler (run "euler")
+        ancestral (run "euler_ancestral")]
+    (is (= [1 1 1 1] (:shape ddim) (:shape euler) (:shape ancestral)))
     (is (not= (arr/->vec sample) (arr/->vec ddim)))
     (is (not= (arr/->vec sample) (arr/->vec euler)))
+    (is (not= (arr/->vec sample) (arr/->vec ancestral)))
     (is (not= (arr/->vec ddim) (arr/->vec euler)))))
 
 (deftest checkpoint-backed-unet-graph-runs-through-ksampler
