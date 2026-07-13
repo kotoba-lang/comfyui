@@ -42,6 +42,20 @@
    :main-opts ["-m" "cljs.main"
                "-co" "{:optimizations :simple :target :nodejs :main comfyui.nodes.toy-diffusion-metal-verify :output-to \"target/toy-diffusion-metal-verify.cjs\"}"
                "-c" "comfyui.nodes.toy-diffusion-metal-verify"]}
+  ;; comfyui.diffusion.model / comfyui.clip.encoder were JVM-only .clj files
+  ;; despite touching no JVM I/O (tensors are injected via a component's
+  ;; :comfyui/read-tensor fn); the only JVM-only surface was bare Math/foo
+  ;; calls, which ClojureScript already resolves natively (same convention as
+  ;; num.tensor/num.autograd). Converted to .cljc; this alias proves the CLJS
+  ;; build produces byte-identical floating-point output to the JVM for real
+  ;; UNet cross-attention/timestep-embedding and CLIP self-attention math.
+  ;;   clojure -M:model-clip-portability-verify && node target/model-clip-portability-verify.cjs
+  :model-clip-portability-verify
+  {:extra-paths ["test"]
+   :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+   :main-opts ["-m" "cljs.main"
+               "-co" "{:optimizations :simple :target :nodejs :main comfyui.diffusion.model-clip-portability-verify :output-to \"target/model-clip-portability-verify.cjs\"}"
+               "-c" "comfyui.diffusion.model-clip-portability-verify"]}
   ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
   :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
