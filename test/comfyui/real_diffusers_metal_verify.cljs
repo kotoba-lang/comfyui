@@ -13,6 +13,12 @@
   (and (= (count expected) (count actual))
        (every? true? (map #(< (Math/abs (- %1 %2)) tolerance) expected actual))))
 
+(defn- f16-checkpoint? [checkpoint]
+  (let [floating #{"F16" "BF16" "F32" "F64"}
+        dtypes (keep #(get % "dtype") (vals (:tensors checkpoint)))]
+    (and (some floating dtypes)
+         (every? #(or (not (floating %)) (= "F16" %)) dtypes))))
+
 (defn -main [& [spec-path unet-path text-path vae-path]]
   (when-not vae-path
     (throw (ex-info "usage: SPEC UNET TEXT_ENCODER VAE" {})))
@@ -20,7 +26,8 @@
         (reader/read-string (js/Deno.readTextFileSync spec-path))
         unet-file (safe/open-file unet-path)
         text-file (safe/open-file text-path)
-        vae-file (safe/open-file vae-path)]
+        vae-file (safe/open-file vae-path)
+        f16? (every? f16-checkpoint? [unet-file text-file vae-file])]
     (-> (dg/request-device)
         (.then
          (fn [request]
@@ -83,23 +90,39 @@
                       stats (dg/backend-stats backend)
                       reader-stats (mapv safe/reader-stats
                                          [unet-file text-file vae-file])
-                      reference-clip [-0.8407002091407776 -0.3963874876499176
-                                      -0.6832109093666077 0.021882688626646996
-                                      -0.6473066210746765 0.13609130680561066
-                                      -1.265396237373352 0.06672965735197067]
-                      reference-image [0.49303802847862244 0.47796139121055603
-                                       0.525601327419281 0.4234960377216339
-                                       0.4761624038219452 0.4867897033691406
-                                       0.3834155797958374 0.40941333770751953]]
+                      reference-clip (if f16?
+                                       [-0.8401386314601924 -0.39627744368989104
+                                        -0.6829871882367291 0.02191159227272704
+                                        -0.6475881348045954 0.13595497578593466
+                                        -1.2650584114823653 0.06671595517928518]
+                                       [-0.8407002091407776 -0.3963874876499176
+                                        -0.6832109093666077 0.021882688626646996
+                                        -0.6473066210746765 0.13609130680561066
+                                        -1.265396237373352 0.06672965735197067])
+                      reference-epsilon (if f16?
+                                          [-8.781381938205236 -8.408713143250834]
+                                          [-8.784357070922852 -8.41365909576416])
+                      reference-latent (if f16? 15.374797308671601
+                                           15.379568099975586)
+                      reference-image (if f16?
+                                        [0.4929879523647378 0.4779479154820478
+                                         0.525698217349902 0.4235678746113127
+                                         0.47616785497202296 0.48686916416119913
+                                         0.3833928842590487 0.40951022731100106]
+                                        [0.49303802847862244 0.47796139121055603
+                                         0.525601327419281 0.4234960377216339
+                                         0.4761624038219452 0.4867897033691406
+                                         0.3834155797958374 0.40941333770751953])
+                      reference-image-sum (if f16? 391.73747777734826
+                                                391.7310791015625)]
                   (when-not
                       (and (close? reference-clip (take 8 clip-values) 1.0e-5)
-                           (close? [-8.784357070922852 -8.41365909576416]
-                                   epsilon-sums 1.0e-4)
+                           (close? reference-epsilon epsilon-sums 1.0e-4)
                            (< (Math/abs (- (reduce + latent-values)
-                                           15.379568099975586)) 1.0e-3)
+                                           reference-latent)) 1.0e-3)
                            (close? reference-image (take 8 image-values) 1.0e-4)
                            (< (Math/abs (- (reduce + image-values)
-                                           391.7310791015625)) 1.0e-2)
+                                           reference-image-sum)) 1.0e-2)
                            (= (:live-buffers baseline) (:live-buffers stats))
                            (= (:live-bytes baseline) (:live-bytes stats))
                            (or (not direct-upload?)
@@ -117,12 +140,14 @@
                                      :image-first8 (vec (take 8 image-values))
                                      :baseline baseline :stats stats
                                      :reader-stats reader-stats})))
-                  (println "OK real Diffusers CLIP→2-step UNet→VAE matches PyTorch on"
+                  (println "OK real Diffusers CLIP→2-step UNet→VAE matches"
+                           (if f16? "JVM CPU oracle on" "PyTorch on")
                            (dg/adapter-description request) "peak-bytes"
                            (:peak-live-bytes stats) "direct-checkpoint-bytes"
                            (reduce + (map :direct-bytes reader-stats))
                            "largest-host-window"
-                           (apply max (map :peak-window-bytes reader-stats)))))))))
+                           (apply max (map :peak-window-bytes reader-stats))
+                           "checkpoint-dtype" (if f16? "F16" "F32"))))))))
         (.catch (fn [error]
                   (println "ERROR:" (or (.-stack error) (str error)))
                   (when-let [data (ex-data error)]

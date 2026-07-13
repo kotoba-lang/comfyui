@@ -57,6 +57,9 @@
   :export-diffusers-metal-spec
   {:extra-paths ["test"]
    :main-opts ["-m" "comfyui.export-diffusers-metal-spec"]}
+  :convert-safetensors-f16
+  {:extra-paths ["test"]
+   :main-opts ["-m" "comfyui.convert-safetensors-f16"]}
   :real-diffusers-metal-verify
   {:extra-paths ["test"]
    :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}

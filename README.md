@@ -392,6 +392,22 @@ execution graph, and the temporary packed buffer is immediately retired.
 dtypes and proves their device expansion plus exact return to the GPU-memory
 baseline; an older num backend exercises the numerically identical host fallback.
 
+For whole-model precision regression, `convert-safetensors-f16` rewrites one
+checkpoint at a time, quantizing floating tensors while preserving integer
+tensors, names, shapes, metadata, and lazy bounded I/O:
+
+```sh
+clojure -M:convert-safetensors-f16 model.safetensors model-f16.safetensors
+```
+
+The public tiny pipeline was converted across all 304 UNet tensors, 85 CLIP
+entries, and 124 VAE entries. Its executable graph then loaded 304/84/70 F16
+tensors through device expansion (458 direct uploads, zero decoded uploads),
+matched an independent JVM CPU execution of the same quantized files within the
+existing Metal tolerances, and returned to zero live GPU bytes. Requested
+checkpoint traffic fell from 7,590,224 F32 bytes to 3,795,112 F16 bytes and the
+largest host window from 294,912 to 147,456 bytes.
+
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
 upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,
