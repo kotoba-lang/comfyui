@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [comfyui.diffusion.model :as model]
             [num.array :as arr]
-            [num.cpu :as cpu]))
+            [num.cpu :as cpu]
+            [num.tensor :as t]))
 
 (def backend (cpu/cpu-backend))
 
@@ -11,6 +12,94 @@
           (let [row (quot index columns) column (mod index columns)]
             (if (= row column) scale 0.0)))
         (range (* rows columns))))
+
+(deftest vae-encoder-selects-posterior-mean-and-scales-latent
+  (let [encode (model/compile-encoder
+                {:comfyui/read-tensor (fn [_ name]
+                                        (throw (ex-info "unexpected tensor" {:name name})))}
+                backend
+                {:layers []
+                 :encoder-layers [{:op :take-channels :channels 3}
+                                  {:op :scale :factor 0.5}]})
+        moments (arr/from-vec backend [1 2, 3 4, 5 6, 7 8, 9 10, 11 12]
+                              [1 6 1 2])
+        latent (encode moments)]
+    (is (= [1 3 1 2] (:shape latent)))
+    (is (= [0.5 1.0, 1.5 2.0, 2.5 3.0] (arr/->vec latent)))))
+
+(deftest vae-encoder-pads-only-right-and-bottom
+  (let [encode (model/compile-encoder
+                {:comfyui/read-tensor (fn [_ name]
+                                        (throw (ex-info "unexpected tensor" {:name name})))}
+                backend
+                {:layers [] :encoder-layers [{:op :pad-right-bottom}]})
+        input (arr/from-vec backend [1 2, 3 4] [1 1 2 2])
+        output (encode input)]
+    (is (= [1 1 3 3] (:shape output)))
+    (is (= [1.0 2.0 0.0, 3.0 4.0 0.0, 0.0 0.0 0.0]
+           (arr/->vec output)))))
+
+(deftest vae-encoder-releases-replaced-intermediates-but-not-input-or-output
+  (let [released (atom [])
+        input (arr/from-vec backend (range 16) [1 4 2 2])]
+    (with-redefs [arr/release! (fn [value] (swap! released conj value) nil)]
+      (let [encode (model/compile-encoder
+                    {:comfyui/read-tensor
+                     (fn [_ name] (throw (ex-info "unexpected tensor" {:name name})))}
+                    backend
+                    {:layers []
+                     :encoder-layers [{:op :pad-right-bottom}
+                                      {:op :take-channels :channels 2}
+                                      {:op :scale :factor 0.5}]})
+            output (encode input)]
+        (is (= [1 2 3 3] (:shape output)))
+        (is (= 2 (count @released)))
+        (is (not-any? #(identical? (:handle input) (:handle %)) @released))
+        (is (not-any? #(identical? (:handle output) (:handle %)) @released))))))
+
+(deftest denoiser-releases-skip-at-last-use-and-protects-callers
+  (let [released (atom [])
+        input (arr/from-vec backend [1.0 2.0] [1 2])
+        denoise (model/compile-denoiser
+                 {:comfyui/read-tensor
+                  (fn [_ name] (throw (ex-info "unexpected tensor" {:name name})))}
+                 backend
+                 {:layers [{:op :save :name :skip}
+                           {:op :scale :factor 2.0}
+                           {:op :add-saved :name :skip}
+                           {:op :scale :factor 0.5}]})]
+    (with-redefs [arr/release! (fn [value] (swap! released conj value) nil)]
+      (let [output (denoise input 0 nil)]
+        (is (= [1.5 3.0] (arr/->vec output)))
+        (is (= 2 (count @released)))
+        (is (not-any? #(identical? (:handle input) (:handle %)) @released))
+        (is (not-any? #(identical? (:handle output) (:handle %)) @released))))))
+
+(deftest saved-liveness-rejects-ambiguous-graphs
+  (let [component {:comfyui/read-tensor (fn [_ _] nil)}]
+    (is (thrown? Exception
+                 (model/compile-denoiser
+                  component backend
+                  {:layers [{:op :add-saved :name :missing}]})))
+    (is (thrown? Exception
+                 (model/compile-denoiser
+                  component backend
+                  {:layers [{:op :save :name :same}
+                            {:op :save :name :same}]})))))
+
+(deftest adjacent-groupnorm-and-silu-compile-to-one-fused-op
+  (let [calls (atom 0)
+        input (arr/from-vec backend [1.0 3.0] [1 2 1 1])]
+    (with-redefs [t/group-norm-silu-nchw
+                  (fn [value _groups _weight _bias _eps]
+                    (swap! calls inc) value)
+                  t/silu (fn [_] (throw (ex-info "unfused SiLU called" {})))]
+      (let [decode (model/compile-decoder
+                    {:comfyui/read-tensor (fn [_ _] nil)} backend
+                    {:layers [{:op :groupnorm :groups 1}
+                              {:op :silu}]})]
+        (is (identical? (:handle input) (:handle (decode input))))
+        (is (= 1 @calls))))))
 
 (deftest vae-spatial-self-attention-executes-and-caches
   (let [identity (arr/from-vec backend (identity-values 2 2 1.0) [2 2])
@@ -212,8 +301,14 @@
         condition-a {:tensor (arr/from-vec backend [0.2 -0.1, 0.4 0.3, -0.2 0.5]
                                                    [1 3 2])}
         condition-b {:tensor (arr/from-vec backend [1 0, 0 1, -1 0.5] [1 3 2])}
-        output-a (denoise sample 0 condition-a)
-        output-b (denoise sample 0 condition-b)]
+        released (atom [])
+        [output-a output-b]
+        (with-redefs [arr/release! (fn [tensor] (swap! released conj tensor))]
+          [(denoise sample 0 condition-a) (denoise sample 0 condition-b)])]
     (is (= (:shape sample) (:shape output-a)))
     (is (every? #(Double/isFinite %) (arr/->vec output-a)))
-    (is (not= (arr/->vec output-a) (arr/->vec output-b)))))
+    (is (not= (arr/->vec output-a) (arr/->vec output-b)))
+    (is (pos? (count @released)))
+    (is (not-any? #(identical? (:handle sample) (:handle %)) @released))
+    (is (not-any? #(identical? (:handle output-a) (:handle %)) @released))
+    (is (not-any? #(identical? (:handle output-b) (:handle %)) @released))))

@@ -118,9 +118,12 @@ upstream ComfyUI.
 
 ## Executable diffusion foundation
 
-`comfyui.nodes.diffusion-runtime/pack` replaces four contracts with real JVM
+`comfyui.nodes.diffusion-runtime/pack` replaces six contracts with real JVM
 execution while retaining the upstream class names and wire types:
 
+- `LoadImage` decodes an input-directory-confined image through ImageIO into
+  batched NHWC RGB `[0,1]` and emits ComfyUI's inverse-alpha mask. Canonical
+  path checks reject traversal and symlink escapes.
 - `CheckpointLoaderSimple` opens and validates a real safetensors file, keeps
   tensor payloads lazy on disk, partitions MODEL/CLIP/VAE tensor catalogs by
   checkpoint prefixes, and decodes requested F16, BF16, F32, F64, signed, or
@@ -134,9 +137,38 @@ execution while retaining the upstream class names and wire types:
   discrete, or Euler ancestral. Euler converts cumulative alpha to sigma,
   scales model input, and integrates the epsilon ODE through final sigma zero;
   the ancestral variant splits each target into sigma-down plus seeded
-  sigma-up noise. The current executable subset is
-  `ddim|euler|euler_ancestral` + `normal` + full denoise; unsupported sampler
+  sigma-up noise. DPM++ 2M follows k-diffusion's exponential multistep
+  recurrence, retains the previous denoised estimate for its second-order
+  correction, and handles terminal sigma zero as an exact denoised-x0 step.
+  Euler and DPM++ additionally accept the Karras rho-7 sigma schedule. Continuous
+  sigma values are mapped back to fractional model timesteps by interpolation in
+  log-sigma space, matching k-diffusion's discrete epsilon-model wrapper.
+  The current executable subset is `ddim` + `normal`, or
+  `euler|euler_ancestral|dpmpp_2m` + `normal|karras`. Denoise values in `(0,1]`
+  are supported: the runtime builds `floor(steps/denoise)` levels and retains
+  the final requested step interval, matching ComfyUI's partial-denoise schedule
+  slicing. DDIM noises an existing latent in alpha space for partial denoise;
+  sigma samplers use `latent + sigma*noise`. Unsupported sampler
   combinations fail explicitly instead of silently changing algorithms.
+  Scheduler scalar multiplication stays device-native and every CFG,
+  derivative, noise, x0, and superseded sample temporary is released after its
+  final dispatch. Step history is metadata-only by default so 20–50 steps do
+  not retain full latent tensors; diagnostics can opt into the intentionally
+  owning `:retain-step-tensors? true` mode. A live Apple Metal verifier runs all
+  four samplers for three steps, checks CPU parity, releases caller-owned
+  inputs/output, and requires live GPU buffer count and bytes to return exactly
+  to their pre-sampler baseline.
+- `VAEEncode` normalizes NHWC RGB `[0,1]` into NCHW `[-1,1]`, executes the
+  checkpoint encoder, selects the diagonal-Gaussian posterior mean, and applies
+  the model scaling factor. Its output connects directly to partial-denoise
+  `KSampler`; `VAEDecode` performs the inverse latent-to-image path. Encoder
+  downsampling reproduces Diffusers' asymmetric right/bottom zero padding
+  before its stride-2 convolution. On an `ITensorBackend`, padding and posterior
+  channel selection dispatch device-native kernels with no intermediate readback.
+  The node-boundary NHWC↔NCHW layout and `[0,1]`↔`[-1,1]` range conversions are
+  likewise fused into one Metal kernel instead of downloading every pixel;
+  `vae-encoder-metal-verify` checks both directions and the encoder graph against
+  the CPU oracle on Apple Metal.
 
 ```clojure
 (require '[comfyui.node :as node]
@@ -162,6 +194,32 @@ with eight trained-parameter tensors, loads it through `CheckpointLoaderSimple`,
 runs a U-shaped down/middle/up/skip denoiser under positive and negative CFG,
 and completes two DDIM steps through the actual graph executor.
 
+Call `comfyui.nodes.diffusion-runtime/release-components!` with loaded
+MODEL/CLIP/VAE outputs when unloading a workflow. It deduplicates shared caches,
+destroys cached GPU tensors, clears the caches, and closes each shared
+safetensors mapping once. VAE encoder/decoder graphs also release replaced
+intermediate tensors between layers while preserving caller inputs and outputs.
+UNet graphs validate unique `:save` names and require every skip use to follow
+its definition. The compiler counts `:add-saved`/`:cat-saved` consumers, keeps a
+skip alive across every consumer, and destroys it immediately after its last use.
+Remaining saved values and timestep embeddings are released when the graph
+returns; caller inputs, cached weights, conditioning, and output remain owned.
+Adjacent graph-level `GroupNorm → SiLU` layers are compiled into num's fused
+Metal kernel. Diffusers ResBlocks use the same primitive internally and release
+their normalization, convolution, and projected-skip temporaries as soon as each
+dependent dispatch has been submitted.
+SpatialTransformer blocks also remain device-native on Metal: last-axis
+LayerNorm, GEGLU slicing/GELU/gating, rank-3/4 axis permutations, broadcast
+batched matmul, and fused self/cross multi-head attention no longer materialize
+host vectors. The Metal verifier executes a complete self-attention →
+cross-attention → GEGLU block and compares its output with the CPU oracle.
+Each residual stage now destroys its normalized input, projected Q/K/V,
+attention output, and feed-forward activation immediately after final use,
+instead of retaining a whole Transformer block's activation set.
+VAE spatial attention and the legacy `:cross-attention` lowering use the same
+fused device kernel, avoiding their former score-matrix host softmax path and
+releasing Q/K/V and projection temporaries after their final dispatch.
+
 `comfyui.diffusion.architecture` inspects tensor names/shapes without decoding
 payloads and identifies SD1 (768 context), SD2 (1024), SDXL base (label
 conditioning + 2048), SDXL refiner (label conditioning + 1280), and 9-channel
@@ -179,7 +237,12 @@ When a CLIP graph spec is present, it additionally executes checkpoint-backed
 token/position embeddings, pre-LayerNorm causal multi-head self-attention,
 QuickGELU MLP/residual blocks, and final LayerNorm, returning both
 `[1,77,hidden]` conditioning and pooled embeddings. Transformer tensors are
-loaded once and reused across repeated prompt encodes.
+loaded once and reused across repeated prompt encodes. Token gather plus
+position addition, LayerNorm, QuickGELU, causal multi-head attention, fused-QKV
+slicing, and EOS pooling all stay device-native on Metal. Each block releases
+its normalized/projection/MLP activations at final use; the live verifier runs a
+multi-layer encoder against the CPU oracle and returns to its pre-encode GPU
+buffer baseline after outputs and cached weights are released.
 For recognized SD1/SD2 checkpoints, the loader derives this CLIP graph
 automatically from the standard `CLIPTextModel` tensor catalog: contiguous
 encoder layer count, hidden width/head count, both norms, Q/K/V/out projections,
@@ -188,8 +251,10 @@ returns no executable encoder instead of silently constructing a partial model.
 For SDXL checkpoints containing two complete HF `CLIPTextModel` catalogs, both
 encoders are inferred and executed automatically. Their per-token features are
 concatenated on the hidden dimension (for example 768 + 1280 = 2048), while the
-second encoder supplies pooled conditioning; individual encoder results remain
-available as `:clip-l` and `:clip-g` for audit/debugging.
+second encoder supplies pooled conditioning. Per-encoder token tensors and the
+unused CLIP-L pool are released after concatenation by default; callers that
+intentionally own both complete diagnostic results can set
+`:retain-encoder-outputs? true` to receive `:clip-l` and `:clip-g`.
 Native SDXL OpenCLIP catalogs are also recognized: `transformer.resblocks.*`,
 fused `attn.in_proj_weight/bias`, `ln_final`, and `text_projection` are mapped
 automatically. Fused projections are split into Q/K/V, CLIP-G uses its
@@ -224,17 +289,23 @@ automatic denoiser instead of installing a partial graph.
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
 decoder conv/normalization/upsampling, converts NCHW RGB from `[-1,1]` to
-clamped NHWC `[0,1]`, and `SaveImage` writes each batch item through the JVM PNG
-codec. The end-to-end runtime fixture executes
+clamped NHWC `[0,1]` in one device-native kernel, and `SaveImage` writes each
+batch item through the JVM PNG codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-Diffusers `AutoencoderKL` decoder files are inferred directly from their
-`config.json`: post-quant projection, mid-block ResNets and spatial self-
-attention, every up block, final normalization, and RGB convolution execute
-without renaming tensors. The real-checkpoint verifier decodes the published
-tiny Stable Diffusion VAE while proving that all 70 decoder tensors are loaded
-and no encoder tensor is touched:
+Diffusers `AutoencoderKL` files are inferred directly from their `config.json`.
+Both current attention tensor names (`to_q/to_k/to_v/to_out.0`) and legacy
+Diffusers 0.7 names (`query/key/value/proj_attn`) are recognized without
+renaming checkpoint files. Legacy scheduler configs that predate serialized
+`prediction_type` correctly default to their original epsilon prediction.
+The decoder executes post-quant projection, mid-block ResNets and spatial self-
+attention, every up block, final normalization, and RGB convolution. The encoder
+executes every down block/downsample, its own mid-block attention, quant projection,
+posterior-mean selection, and latent scaling without renaming tensors. Decoder and
+encoder retain independent lazy tensor caches. The real-checkpoint verifier decodes
+and then re-encodes the published tiny Stable Diffusion VAE, proving both paths load
+their actual tensor catalogs:
 
 ```sh
 clojure -M:real-diffusers-vae-verify vae.safetensors vae/config.json
@@ -271,13 +342,18 @@ The pipeline verifier additionally runs a fixed-noise, two-step `[501, 1]`
 DDIM trajectory through positive/negative CFG and the VAE. Against the same
 PyTorch/Diffusers trajectory, guided epsilon sums agree within `1e-4`, final
 latent and image sums within `1e-3`, and sampled output pixels within `1e-4`.
+It was rerun against the public `Narsil/tiny-stable-diffusion-torch` split
+safetensors pipeline after these compatibility changes: all 304 UNet, 84 CLIP,
+and 70 VAE tensors loaded, a real 852-byte PNG was emitted, CLIP max error was
+`6.07e-7`, two-step epsilon max error `1.03e-5`, latent-sum error `2.68e-6`,
+and image max/sum errors `1.19e-5` / `7.80e-5`.
 Full-denoise DDIM begins from the seeded noise tensor (`init_noise_sigma=1`),
 while Euler retains sigma-scaled initialization.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
-upstream Diffusers, and additional
-ancestral/DPM sampler families, additional VAE variants, mixed precision, and an installed real
+upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,
+exponential/polyexponential schedules, additional VAE variants, mixed precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 

@@ -12,8 +12,8 @@
             [num.tensor :as t]))
 
 (def ^:private supported-ops
-  #{:conv2d :groupnorm :silu :save :add-saved :cat-saved :upsample
-    :scale :add-conditioning :cross-attention :timestep-bias :timestep-embedding
+  #{:conv2d :groupnorm :groupnorm-silu :silu :save :add-saved :cat-saved :upsample
+    :scale :pad-right-bottom :take-channels :add-conditioning :cross-attention :timestep-bias :timestep-embedding
     :timestep-vector :sdxl-label-embedding :add-embedding :resblock
     :spatial-transformer :vae-attention})
 
@@ -93,88 +93,73 @@
             {:projected (:shape projected) :value (:shape value)}))
     (t/add value (t/reshape projected [1 channels 1 1]))))
 
+(defn- take-channels [value channels]
+  (let [[_batch input-channels _height _width :as shape] (:shape value)]
+    (when-not (and (= 4 (count shape)) (pos-int? channels)
+                   (<= channels input-channels))
+      (fail "take-channels requires NCHW and a valid channel count"
+            {:shape shape :channels channels}))
+    (t/slice-axis value 1 0 channels)))
+
+(defn- pad-right-bottom [value]
+  (let [shape (:shape value)]
+    (when-not (= 4 (count shape))
+      (fail "pad-right-bottom requires NCHW" {:shape shape}))
+    (t/pad-right-bottom-nchw value)))
+
 (defn- resblock [value embedding tensor! layer]
   (let [groups (or (:groups layer) 32)
         residual value
-        hidden (-> value
-                   (t/group-norm-nchw groups
-                                      (tensor! (:in-norm-weight layer))
-                                      (tensor! (:in-norm-bias layer)) 1.0e-5)
-                   t/silu
-                   (t/conv2d-nchw (tensor! (:in-conv-weight layer))
-                                  (tensor! (:in-conv-bias layer))
-                                  {:padding 1}))
+        normalized-in (t/group-norm-silu-nchw
+                       value groups (tensor! (:in-norm-weight layer))
+                       (tensor! (:in-norm-bias layer)) 1.0e-5)
+        hidden-in (t/conv2d-nchw normalized-in
+                                 (tensor! (:in-conv-weight layer))
+                                 (tensor! (:in-conv-bias layer)) {:padding 1})
+        _ (arr/release! normalized-in)
         hidden (if (:embedding-weight layer)
-                 (add-embedding hidden embedding tensor!
-                                {:weight (:embedding-weight layer)
-                                 :bias (:embedding-bias layer)})
-                 hidden)
-        hidden (-> hidden
-                   (t/group-norm-nchw groups
-                                      (tensor! (:out-norm-weight layer))
-                                      (tensor! (:out-norm-bias layer)) 1.0e-5)
-                   t/silu
-                   (t/conv2d-nchw (tensor! (:out-conv-weight layer))
-                                  (tensor! (:out-conv-bias layer))
-                                  {:padding 1}))
+                 (let [conditioned
+                       (add-embedding hidden-in embedding tensor!
+                                      {:weight (:embedding-weight layer)
+                                       :bias (:embedding-bias layer)})]
+                   (arr/release! hidden-in)
+                   conditioned)
+                 hidden-in)
+        normalized-out (t/group-norm-silu-nchw
+                        hidden groups (tensor! (:out-norm-weight layer))
+                        (tensor! (:out-norm-bias layer)) 1.0e-5)
+        hidden-out (t/conv2d-nchw normalized-out
+                                  (tensor! (:out-conv-weight layer))
+                                  (tensor! (:out-conv-bias layer)) {:padding 1})
+        _ (arr/release! normalized-out)
+        _ (arr/release! hidden)
         residual (if (:skip-weight layer)
                    (t/conv2d-nchw residual (tensor! (:skip-weight layer))
                                   (tensor! (:skip-bias layer)))
                    residual)]
-    (when-not (= (:shape hidden) (:shape residual))
+    (when-not (= (:shape hidden-out) (:shape residual))
       (fail "ResBlock hidden/skip shapes differ"
-            {:hidden (:shape hidden) :skip (:shape residual)}))
-    (nm/add residual hidden)))
+            {:hidden (:shape hidden-out) :skip (:shape residual)}))
+    (let [output (nm/add residual hidden-out)]
+      (arr/release! hidden-out)
+      (when (:skip-weight layer) (arr/release! residual))
+      output)))
 
 (defn- layer-norm [x weight bias eps]
-  (let [shape (:shape x) hidden (long (last shape))
-        rows (quot (arr/nelems shape) hidden)
-        xs (double-array (arr/->vec x))
-        ws (double-array (arr/->vec weight))
-        bs (double-array (arr/->vec bias))
-        out (double-array (arr/nelems shape))]
-    (dotimes [row rows]
-      (let [base (* row hidden)
-            mean (/ (loop [i 0 sum 0.0]
-                      (if (< i hidden) (recur (inc i) (+ sum (aget xs (+ base i)))) sum))
-                    hidden)
-            variance (/ (loop [i 0 sum 0.0]
-                          (if (< i hidden)
-                            (let [delta (- (aget xs (+ base i)) mean)]
-                              (recur (inc i) (+ sum (* delta delta)))) sum))
-                        hidden)
-            inv-std (/ 1.0 (Math/sqrt (+ variance eps)))]
-        (dotimes [i hidden]
-          (aset out (+ base i)
-                (+ (* (- (aget xs (+ base i)) mean) inv-std (aget ws i))
-                   (aget bs i))))))
-    (arr/from-vec (:backend x) (vec out) shape)))
+  (t/layer-norm-last x weight bias eps))
 
 (defn- sequence-attention [query context tensor! spec heads]
-  (let [[batch query-length hidden] (:shape query)
-        context-length (second (:shape context))
-        head-dim (quot hidden heads)
-        projection (fn [source weight-key bias-key]
+  (let [projection (fn [source weight-key bias-key]
                      (linear source (tensor! (get spec weight-key))
                              (tensor! (get spec bias-key))))
-        split (fn [value length]
-                (t/transpose (t/reshape value [batch length heads head-dim])
-                             [0 2 1 3]))
-        q (split (projection query :query-weight :query-bias) query-length)
-        k (split (projection context :key-weight :key-bias) context-length)
-        v (split (projection context :value-weight :value-bias) context-length)
-        scores (nm/scal! (/ 1.0 (Math/sqrt head-dim))
-                         (t/matmul q (t/transpose k [0 1 3 2])))
-        probabilities (t/softmax scores)
-        attended (t/matmul probabilities v)
-        merged (t/reshape (t/transpose attended [0 2 1 3])
-                          [batch query-length hidden])]
-    (linear merged (tensor! (:output-weight spec)) (tensor! (:output-bias spec)))))
-
-(defn- gelu [value]
-  (* 0.5 value
-     (+ 1.0 (Math/tanh (* 0.7978845608
-                     (+ value (* 0.044715 value value value)))))))
+        q (projection query :query-weight :query-bias)
+        k (projection context :key-weight :key-bias)
+        v (projection context :value-weight :value-bias)
+        attended (t/multi-head-attention q k v heads)
+        output (linear attended (tensor! (:output-weight spec))
+                       (tensor! (:output-bias spec)))]
+    (doseq [temporary [q k v attended]] (arr/release! temporary))
+    output))
 
 (defn- geglu [x tensor! spec]
   (let [projected (linear x (tensor! (:project-weight spec))
@@ -182,21 +167,16 @@
         shape (:shape projected)
         doubled (last shape)
         inner (quot doubled 2)
-        rows (quot (arr/nelems shape) doubled)
-        values (vec (arr/->vec projected))
-        gated (vec
-               (mapcat
-                (fn [row]
-                  (let [base (* row doubled)]
-                    (mapv (fn [i]
-                            (let [value (nth values (+ base i))
-                                  gate (nth values (+ base inner i))
-                                  activated (gelu gate)]
-                              (* value activated)))
-                          (range inner))))
-                (range rows)))
-        hidden (arr/from-vec (:backend x) gated (assoc shape (dec (count shape)) inner))]
-    (linear hidden (tensor! (:output-weight spec)) (tensor! (:output-bias spec)))))
+        axis (dec (count shape))
+        value (t/slice-axis projected axis 0 inner)
+        gate (t/slice-axis projected axis inner doubled)
+        activated (nm/gelu gate)
+        hidden (nm/mul value activated)
+        output (linear hidden (tensor! (:output-weight spec))
+                       (tensor! (:output-bias spec)))]
+    (doseq [temporary [projected value gate activated hidden]]
+      (arr/release! temporary))
+    output))
 
 (defn- spatial-transformer [value conditioning tensor! layer]
   (let [[batch channels height width] (:shape value)
@@ -207,14 +187,20 @@
                                             (tensor! (:norm-weight layer))
                                             (tensor! (:norm-bias layer)) 1.0e-6)
         projected (if (:linear-projection? layer)
-                    (linear (t/reshape (t/transpose normalized [0 2 3 1])
-                                       [batch (* height width) channels])
-                            (tensor! (:proj-in-weight layer))
-                            (tensor! (:proj-in-bias layer)))
+                    (let [sequence (t/reshape (t/transpose normalized [0 2 3 1])
+                                              [batch (* height width) channels])
+                          output (linear sequence
+                                         (tensor! (:proj-in-weight layer))
+                                         (tensor! (:proj-in-bias layer)))]
+                      (arr/release! sequence)
+                      output)
                     (let [nchw (t/conv2d-nchw normalized (tensor! (:proj-in-weight layer))
-                                              (tensor! (:proj-in-bias layer)))]
-                      (t/reshape (t/transpose nchw [0 2 3 1])
-                                 [batch (* height width) channels])))
+                                              (tensor! (:proj-in-bias layer)))
+                          sequence (t/reshape (t/transpose nchw [0 2 3 1])
+                                              [batch (* height width) channels])]
+                      (arr/release! nchw)
+                      sequence))
+        _ (arr/release! normalized)
         transformed
         (reduce
          (fn [x block]
@@ -223,15 +209,23 @@
                                         (tensor! (:norm1-bias block)) 1.0e-5)
                  self-output (sequence-attention self-input self-input tensor!
                                                  (:self-attention block) heads)
-                 x (nm/add x self-output)
-                 cross-input (layer-norm x (tensor! (:norm2-weight block))
+                 after-self (nm/add x self-output)
+                 _ (doseq [temporary [x self-input self-output]]
+                     (arr/release! temporary))
+                 cross-input (layer-norm after-self (tensor! (:norm2-weight block))
                                          (tensor! (:norm2-bias block)) 1.0e-5)
                  cross-output (sequence-attention cross-input context tensor!
                                                   (:cross-attention block) heads)
-                 x (nm/add x cross-output)
-                 ff-input (layer-norm x (tensor! (:norm3-weight block))
-                                      (tensor! (:norm3-bias block)) 1.0e-5)]
-             (nm/add x (geglu ff-input tensor! (:feed-forward block)))))
+                 after-cross (nm/add after-self cross-output)
+                 _ (doseq [temporary [after-self cross-input cross-output]]
+                     (arr/release! temporary))
+                 ff-input (layer-norm after-cross (tensor! (:norm3-weight block))
+                                      (tensor! (:norm3-bias block)) 1.0e-5)
+                 ff-output (geglu ff-input tensor! (:feed-forward block))
+                 result (nm/add after-cross ff-output)]
+             (doseq [temporary [after-cross ff-input ff-output]]
+               (arr/release! temporary))
+             result))
          projected (:blocks layer))
         output (if (:linear-projection? layer)
                  (let [sequence (linear transformed (tensor! (:proj-out-weight layer))
@@ -241,8 +235,11 @@
                  (t/conv2d-nchw
                   (t/transpose (t/reshape transformed [batch height width channels])
                                [0 3 1 2])
-                  (tensor! (:proj-out-weight layer)) (tensor! (:proj-out-bias layer))))]
-    (nm/add residual output)))
+                  (tensor! (:proj-out-weight layer)) (tensor! (:proj-out-bias layer))))
+        result (nm/add residual output)]
+    (arr/release! transformed)
+    (arr/release! output)
+    result))
 
 (defn- cross-attention
   [value condition tensor! layer]
@@ -258,7 +255,6 @@
             (fail "attention heads must divide channels"
                   {:channels channels :heads heads}))
         sequence (* height width)
-        head-dim (quot channels heads)
         x-sequence (t/reshape (t/transpose value [0 2 3 1])
                               [batch sequence channels])
         projection (fn [prefix source]
@@ -267,22 +263,16 @@
         q (projection "query" x-sequence)
         k (projection "key" condition)
         v (projection "value" condition)
-        tokens (second (:shape condition))
-        split (fn [tensor length]
-                (t/transpose (t/reshape tensor [batch length heads head-dim])
-                             [0 2 1 3]))
-        qh (split q sequence) kh (split k tokens) vh (split v tokens)
-        scores (t/matmul qh (t/transpose kh [0 1 3 2]))
-        scaled (nm/scal! (/ 1.0 (Math/sqrt head-dim)) scores)
-        probabilities (t/softmax scaled)
-        attended (t/matmul probabilities vh)
-        merged (t/reshape (t/transpose attended [0 2 1 3])
-                          [batch sequence channels])
-        projected (linear merged (tensor! (:output-weight layer))
+        attended (t/multi-head-attention q k v heads)
+        projected (linear attended (tensor! (:output-weight layer))
                           (tensor! (:output-bias layer)))
         nchw (t/transpose (t/reshape projected [batch height width channels])
-                          [0 3 1 2])]
-    (if (false? (:residual layer)) nchw (nm/add value nchw))))
+                          [0 3 1 2])
+        result (if (false? (:residual layer)) nchw (nm/add value nchw))]
+    (doseq [temporary (cond-> [x-sequence q k v attended projected]
+                        (not (false? (:residual layer))) (conj nchw))]
+      (arr/release! temporary))
+    result))
 
 (defn- vae-attention [value tensor! layer]
   (let [[batch channels height width :as shape] (:shape value)
@@ -300,17 +290,19 @@
         query (projection "query")
         key (projection "key")
         value-projection (projection "value")
-        scores (nm/scal! (/ 1.0 (Math/sqrt channels))
-                         (t/matmul query (t/transpose key [0 2 1])))
-        attended (t/matmul (t/softmax scores) value-projection)
+        attended (t/multi-head-attention query key value-projection 1)
         projected (linear attended (tensor! (:output-weight layer))
                           (tensor! (:output-bias layer)))
         output (t/transpose (t/reshape projected [batch height width channels])
-                            [0 3 1 2])]
+                            [0 3 1 2])
+        result (nm/add value output)]
     (when-not (= shape (:shape output))
       (fail "VAE attention changed tensor shape"
             {:input shape :output (:shape output)}))
-    (nm/add value output)))
+    (doseq [temporary [normalized sequence query key value-projection
+                       attended projected output]]
+      (arr/release! temporary))
+    result))
 
 (defn- timestep-embedding [value timestep tensor! layer]
   (let [first-weight (tensor! (:first-weight layer))
@@ -338,6 +330,45 @@
             {:projected (:shape projected) :channels channels}))
     (t/add value (t/reshape projected [1 channels 1 1]))))
 
+(defn- saved-use-counts [layers]
+  (frequencies
+   (keep (fn [layer]
+           (when (#{:add-saved :cat-saved} (:op layer)) (:name layer)))
+         layers)))
+
+(defn- validate-saved-liveness! [layers]
+  (loop [remaining layers saved #{}]
+    (when-let [layer (first remaining)]
+      (let [op (:op layer) name (:name layer)]
+        (cond
+          (= :save op)
+          (do
+            (when (or (nil? name) (contains? saved name))
+              (fail "saved tensor names must be non-nil and unique"
+                    {:name name :layer layer}))
+            (recur (next remaining) (conj saved name)))
+
+          (#{:add-saved :cat-saved} op)
+          (do
+            (when-not (contains? saved name)
+              (fail "saved tensor must be defined before use"
+                    {:name name :layer layer}))
+            (recur (next remaining) saved))
+
+          :else (recur (next remaining) saved))))))
+
+(defn- same-handle? [a b]
+  (and a b (identical? (:handle a) (:handle b))))
+
+(defn- fuse-execution-layers [layers]
+  (loop [remaining layers output []]
+    (if-let [layer (first remaining)]
+      (if (and (= :groupnorm (:op layer))
+               (= :silu (:op (second remaining))))
+        (recur (nnext remaining) (conj output (assoc layer :op :groupnorm-silu)))
+        (recur (next remaining) (conj output layer)))
+      (vec output))))
+
 (defn- compile-graph
   [component backend {:keys [layers] :as spec} same-shape?]
   (when-not (and backend (fn? (:comfyui/read-tensor component))
@@ -348,7 +379,10 @@
     (when-not (contains? supported-ops (:op layer))
       (fail "unsupported model op" {:index index :layer layer
                                      :supported supported-ops})))
+  (validate-saved-liveness! layers)
   (let [cache (atom {})
+        execution-layers (fuse-execution-layers layers)
+        initial-saved-uses (saved-use-counts layers)
         tensor! (fn [tensor-name]
                   (when tensor-name
                     (or (get @cache tensor-name)
@@ -357,11 +391,13 @@
                           tensor))))]
     (with-meta
       (fn [sample timestep conditioning]
-        (let [initial {:value sample :saved {} :embedding nil}
+        (let [initial {:value sample :saved {} :embedding nil
+                       :saved-uses initial-saved-uses}
               result
               (reduce
-               (fn [{:keys [value saved] :as state} layer]
-                 (case (:op layer)
+               (fn [{:keys [value saved embedding saved-uses] :as state} layer]
+                 (let [next-state
+                       (case (:op layer)
                    :conv2d
                    (assoc state :value
                           (t/conv2d-nchw
@@ -378,13 +414,16 @@
                                              (tensor! (:bias layer))
                                              (or (:eps layer) 1.0e-5)))
 
+                   :groupnorm-silu
+                   (assoc state :value
+                          (t/group-norm-silu-nchw
+                           value (:groups layer) (tensor! (:weight layer))
+                           (tensor! (:bias layer)) (or (:eps layer) 1.0e-5)))
+
                    :silu (assoc state :value (t/silu value))
 
                    :scale
-                   (assoc state :value
-                          (nm/scal! (double (:factor layer))
-                                    (arr/from-vec (:backend value)
-                                                  (arr/->vec value) (:shape value))))
+                   (assoc state :value (t/scale value (:factor layer)))
 
                    :save
                    (assoc-in state [:saved (:name layer)] value)
@@ -453,12 +492,50 @@
                    :vae-attention
                    (assoc state :value (vae-attention value tensor! layer))
 
+                   :pad-right-bottom
+                   (assoc state :value (pad-right-bottom value))
+
+                   :take-channels
+                   (assoc state :value (take-channels value (:channels layer)))
+
                    :timestep-bias
                    (let [bias (* (double (or (:scale layer) 1.0)) (double timestep))
                          scalar (arr/from-vec (:backend value) [bias] [])]
-                     (assoc state :value (t/add value scalar)))))
-               initial layers)
+                     (assoc state :value (t/add value scalar))))
+                       consumed-name (when (#{:add-saved :cat-saved} (:op layer))
+                                       (:name layer))
+                       uses-left (when consumed-name
+                                   (dec (long (get saved-uses consumed-name))))
+                       consumed (when (and consumed-name (zero? uses-left))
+                                  (get saved consumed-name))
+                       next-state (cond-> next-state
+                                    consumed-name
+                                    (assoc-in [:saved-uses consumed-name] uses-left)
+                                    (and consumed-name (zero? uses-left))
+                                    (update :saved dissoc consumed-name))]
+                   (when (:release-intermediates? spec)
+                     (let [protected (concat [sample (:value next-state)
+                                              (:embedding next-state)]
+                                             (vals (:saved next-state)))
+                           candidates (cond-> [value consumed]
+                                        (and embedding
+                                             (not (same-handle?
+                                                   embedding (:embedding next-state))))
+                                        (conj embedding))]
+                       (arr/release-all!
+                        (remove (fn [candidate]
+                                  (or (nil? candidate)
+                                      (some #(same-handle? candidate %) protected)))
+                                candidates))))
+                   next-state))
+               initial execution-layers)
               output (:value result)]
+          (when (:release-intermediates? spec)
+            (arr/release-all!
+             (remove (fn [candidate]
+                       (or (same-handle? candidate sample)
+                           (same-handle? candidate output)))
+                     (concat (vals (:saved result)) [(:embedding result)]))))
           (when (and same-shape? (not= (:shape sample) (:shape output)))
             (fail "epsilon output shape must equal sample shape"
                   {:sample (:shape sample) :output (:shape output)}))
@@ -472,11 +549,21 @@
   `:comfyui/read-tensor`; weights are read lazily on `backend`. Output shape is
   required to equal sample shape, matching epsilon-prediction KSampler models."
   [component backend spec]
-  (compile-graph component backend spec true))
+  (compile-graph component backend (assoc spec :release-intermediates? true) true))
 
 (defn compile-decoder
   "Compile a checkpoint-backed graph into `(fn [latent] image)`. Unlike a
   denoiser, a decoder may change channel and spatial dimensions."
   [component backend spec]
-  (let [graph (compile-graph component backend spec false)]
+  (let [graph (compile-graph component backend
+                             (assoc spec :release-intermediates? true) false)]
     (with-meta (fn [latent] (graph latent 0 nil)) (meta graph))))
+
+(defn compile-encoder
+  "Compile a checkpoint-backed image-to-latent graph. Encoder specs retain
+  decoder layers separately under `:layers` and expose `:encoder-layers`."
+  [component backend spec]
+  (let [graph (compile-graph component backend
+                             (assoc spec :layers (:encoder-layers spec)
+                                    :release-intermediates? true) false)]
+    (with-meta (fn [image] (graph image 0 nil)) (meta graph))))

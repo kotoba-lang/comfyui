@@ -627,24 +627,35 @@
     (when (every? names required) layer)))
 
 (defn- diffusers-vae-attention [names prefix groups]
-  (let [layer {:op :vae-attention :groups groups
-               :norm-weight (str prefix "group_norm.weight")
-               :norm-bias (str prefix "group_norm.bias")
-               :query-weight (str prefix "to_q.weight")
-               :query-bias (str prefix "to_q.bias")
-               :key-weight (str prefix "to_k.weight")
-               :key-bias (str prefix "to_k.bias")
-               :value-weight (str prefix "to_v.weight")
-               :value-bias (str prefix "to_v.bias")
-               :output-weight (str prefix "to_out.0.weight")
-               :output-bias (str prefix "to_out.0.bias")}
-        required (vals (dissoc layer :op :groups))]
-    (when (every? names required) layer)))
+  (let [base {:op :vae-attention :groups groups
+              :norm-weight (str prefix "group_norm.weight")
+              :norm-bias (str prefix "group_norm.bias")}
+        modern (assoc base
+                      :query-weight (str prefix "to_q.weight")
+                      :query-bias (str prefix "to_q.bias")
+                      :key-weight (str prefix "to_k.weight")
+                      :key-bias (str prefix "to_k.bias")
+                      :value-weight (str prefix "to_v.weight")
+                      :value-bias (str prefix "to_v.bias")
+                      :output-weight (str prefix "to_out.0.weight")
+                      :output-bias (str prefix "to_out.0.bias"))
+        legacy (assoc base
+                      :query-weight (str prefix "query.weight")
+                      :query-bias (str prefix "query.bias")
+                      :key-weight (str prefix "key.weight")
+                      :key-bias (str prefix "key.bias")
+                      :value-weight (str prefix "value.weight")
+                      :value-bias (str prefix "value.bias")
+                      :output-weight (str prefix "proj_attn.weight")
+                      :output-bias (str prefix "proj_attn.bias"))
+        complete? #(every? names (vals (dissoc % :op :groups)))]
+    (cond (complete? modern) modern
+          (complete? legacy) legacy)))
 
 (defn infer-diffusers-vae-spec
-  "Lower a Diffusers AutoencoderKL decoder safetensors file plus config.json
-  into an executable latent-to-RGB graph. Encoder tensors may coexist but are
-  intentionally excluded from the lazy decoder cache."
+  "Lower Diffusers AutoencoderKL encoder and decoder graphs from safetensors
+  plus config.json. Decoder-only files remain valid; a complete encoder is
+  exposed separately as `:encoder-layers`."
   [checkpoint config]
   (let [names (set (safe/tensor-names checkpoint))
         getc #(or (get config %) (get config (keyword %)))
@@ -655,6 +666,8 @@
                            (long (first configured-layers))
                            (long configured-layers))
         scaling-factor (double (or (getc "scaling_factor") 0.18215))
+        latent-channels (long (getc "latent_channels"))
+        down-types (vec (getc "down_block_types"))
         up-types (vec (getc "up_block_types"))
         initial [{:op :scale :factor (/ 1.0 scaling-factor)}
                  {:op :conv2d :weight "post_quant_conv.weight"
@@ -689,14 +702,56 @@
                {:op :conv2d :weight "decoder.conv_out.weight"
                 :bias "decoder.conv_out.bias" :padding 1}]
         layers (vec (concat initial middle decoder final))
-        tensor-names (->> layers (mapcat vals) (filter string?))]
+        tensor-names (->> layers (mapcat vals) (filter string?))
+        encoder-initial [{:op :conv2d :weight "encoder.conv_in.weight"
+                          :bias "encoder.conv_in.bias" :padding 1}]
+        encoder-down
+        (vec
+         (mapcat
+          (fn [block]
+            (let [resnets (mapv #(diffusers-vae-resblock
+                                  names (str "encoder.down_blocks." block ".resnets." % ".")
+                                  groups)
+                                (range layers-per-block))
+                  downsample (when (< block (dec (count channels)))
+                               [{:op :pad-right-bottom}
+                                {:op :conv2d
+                                 :weight (str "encoder.down_blocks." block
+                                              ".downsamplers.0.conv.weight")
+                                 :bias (str "encoder.down_blocks." block
+                                            ".downsamplers.0.conv.bias")
+                                 :stride 2 :padding 0}])]
+              (concat resnets downsample)))
+          (range (count channels))))
+        encoder-middle [(diffusers-vae-resblock names "encoder.mid_block.resnets.0." groups)
+                        (diffusers-vae-attention names
+                                                 "encoder.mid_block.attentions.0." groups)
+                        (diffusers-vae-resblock names "encoder.mid_block.resnets.1." groups)]
+        encoder-final [{:op :groupnorm :groups groups
+                        :weight "encoder.conv_norm_out.weight"
+                        :bias "encoder.conv_norm_out.bias"}
+                       {:op :silu}
+                       {:op :conv2d :weight "encoder.conv_out.weight"
+                        :bias "encoder.conv_out.bias" :padding 1}
+                       {:op :conv2d :weight "quant_conv.weight"
+                        :bias "quant_conv.bias"}
+                       {:op :take-channels :channels latent-channels}
+                       {:op :scale :factor scaling-factor}]
+        encoder-layers (vec (concat encoder-initial encoder-down
+                                    encoder-middle encoder-final))
+        encoder-tensors (->> encoder-layers (mapcat vals) (filter string?))
+        encoder-complete? (and (= (count channels) (count down-types))
+                               (every? #(str/includes? % "DownEncoderBlock2D") down-types)
+                               (every? some? encoder-layers)
+                               (every? names encoder-tensors))]
     (when (and (= "AutoencoderKL" (getc "_class_name"))
                (pos? scaling-factor) (seq channels)
                (= (count channels) (count up-types))
                (every? #(str/includes? % "UpDecoderBlock2D") up-types)
                (every? some? layers) (every? names tensor-names))
       {:architecture :diffusers-autoencoder-kl
-       :latent-channels (long (getc "latent_channels"))
+       :latent-channels latent-channels
        :out-channels (long (getc "out_channels"))
        :scaling-factor scaling-factor
-       :layers layers})))
+       :layers layers
+       :encoder-layers (when encoder-complete? encoder-layers)})))

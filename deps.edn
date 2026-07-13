@@ -68,6 +68,12 @@
    :main-opts ["-m" "cljs.main"
                 "-co" "{:optimizations :simple :target :nodejs :main comfyui.diffusion.model-clip-portability-verify :output-to \"target/model-clip-portability-verify.cjs\"}"
                 "-c" "comfyui.diffusion.model-clip-portability-verify"]}
+  :vae-encoder-metal-verify
+  {:extra-paths ["test"]
+   :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+   :main-opts ["-m" "cljs.main"
+               "-co" "{:optimizations :simple :target :nodejs :main comfyui.vae-encoder-metal-verify :output-to \"target/vae-encoder-metal-verify.cjs\"}"
+               "-c" "comfyui.vae-encoder-metal-verify"]}
   ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
   :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"

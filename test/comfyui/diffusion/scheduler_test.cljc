@@ -88,6 +88,8 @@
     (is (approx? 1.0 sigma2))
     (is (= [2 1] (mapv :timestep @events)))
     (is (zero? (:sigma-next (last @events))))
+    (is (every? #(not (contains? % :predicted-original-sample))
+                (:history result)))
     (is (approx? expected (first (arr/->vec (:sample result)))))))
 
 (deftest euler-ancestral-splits-deterministic-and-noise-sigmas
@@ -107,3 +109,58 @@
     (is (every? #(<= 0.0 (:sigma-down %) (:sigma-next %)) @events))
     (is (= (arr/->vec (:sample first-run))
            (arr/->vec (:sample second-run))))))
+
+(deftest dpmpp-2m-matches-k-diffusion-multistep-equation
+  (let [events (atom [])
+        result (scheduler/dpmpp-2m-sample
+                {:sample (arr/from-vec backend [2.0] [1])
+                 :alphas [0.92 0.8 0.6 0.4] :timesteps [3 2 1]
+                 :negative (arr/from-vec backend [0.1] [1])
+                 :positive (arr/from-vec backend [0.3] [1]) :cfg 2.0
+                 :retain-step-tensors? true
+                 :denoise-fn (fn [_ _ conditioning] conditioning)
+                 :on-step #(swap! events conj %)})]
+    ;; Independently evaluated from k-diffusion's exponential 2M recurrence.
+    (is (approx? 1.3876275643042053
+                 (first (arr/->vec (:sample result)))))
+    (is (= [1 2 1] (mapv :order @events)))
+    (is (= [3 2 1] (mapv :timestep @events)))
+    (is (zero? (:sigma-next (last @events))))
+    (is (contains? (last (:history result)) :predicted-original-sample))
+    (is (approx? (first (arr/->vec (:predicted-original-sample
+                                    (last @events))))
+                 (first (arr/->vec (:sample result)))))))
+
+(deftest karras-schedule-and-log-sigma-timestep-match-reference
+  (let [sigmas (scheduler/karras-sigmas 4 0.1 10.0)
+        expected [10.000000000000002 2.934120009183319
+                  0.6628858545390911 0.10000000000000003 0.0]
+        alphas [0.9 0.5 0.1]
+        midpoint (Math/sqrt (* (scheduler/alpha->sigma 0.9)
+                               (scheduler/alpha->sigma 0.5)))]
+    (is (every? true? (map approx? expected sigmas)))
+    (is (apply > (butlast sigmas)))
+    (is (approx? 0.5 (scheduler/sigma->timestep alphas midpoint)))
+    (is (approx? 0.0 (scheduler/sigma->timestep
+                      alphas (scheduler/alpha->sigma 0.9))))
+    (is (approx? 2.0 (scheduler/sigma->timestep
+                      alphas (scheduler/alpha->sigma 0.1))))))
+
+(deftest dpmpp-2m-consumes-explicit-karras-sigmas-and-fractional-timesteps
+  (let [calls (atom []) events (atom [])
+        alphas [0.92 0.8 0.6 0.4]
+        sigmas (scheduler/karras-sigmas
+                3 (scheduler/alpha->sigma (first alphas))
+                (scheduler/alpha->sigma (last alphas)))
+        timesteps (mapv #(scheduler/sigma->timestep alphas %) (butlast sigmas))
+        result (scheduler/dpmpp-2m-sample
+                {:sample (arr/from-vec backend [2.0] [1])
+                 :alphas alphas :timesteps timesteps :sigmas sigmas
+                 :negative (arr/from-vec backend [0.1] [1])
+                 :positive (arr/from-vec backend [0.3] [1]) :cfg 2.0
+                 :denoise-fn (fn [_ timestep conditioning]
+                               (swap! calls conj timestep) conditioning)
+                 :on-step #(swap! events conj %)})]
+    (is (= sigmas (conj (mapv :sigma @events) 0.0)))
+    (is (= (vec (mapcat #(vector % %) timesteps)) @calls))
+    (is (= [1] (:shape (:sample result))))))

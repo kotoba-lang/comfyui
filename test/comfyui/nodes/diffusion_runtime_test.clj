@@ -9,11 +9,33 @@
             [comfyui.safetensors :as safe]
             [num.array :as arr]
             [num.cpu :as cpu])
-  (:import [java.nio ByteBuffer ByteOrder]
+  (:import [java.awt.image BufferedImage]
+           [java.nio ByteBuffer ByteOrder]
            [java.nio.file Files OpenOption]
-           [java.nio.file.attribute FileAttribute]))
+           [java.nio.file.attribute FileAttribute]
+           [javax.imageio ImageIO]))
 
 (def backend (cpu/cpu-backend))
+
+(deftest legacy-diffusers-scheduler-defaults-to-epsilon-prediction
+  (let [alphas-fn (ns-resolve 'comfyui.nodes.diffusion-runtime 'diffusers-alphas)
+        alphas (alphas-fn {"num_train_timesteps" 4
+                           "beta_start" 0.00085 "beta_end" 0.012
+                           "beta_schedule" "scaled_linear"})]
+    (is (= 4 (count alphas)))
+    (is (apply > alphas))))
+
+(deftest releasing-components-deduplicates-and-clears-weight-caches
+  (let [weight (arr/from-vec backend [1.0 2.0] [2])
+        cache (atom {"weight" weight})
+        compiled (with-meta (fn [_] nil) {:comfyui/tensor-cache cache})
+        released (atom nil)]
+    (with-redefs [arr/release-all! (fn [arrays]
+                                    (reset! released (vec arrays)) nil)]
+      (is (nil? (runtime/release-components!
+                 [{:comfyui/decode compiled} {:comfyui/encode compiled}])))
+      (is (= [weight] @released))
+      (is (= {} @cache)))))
 
 (defn- checkpoint-fixture []
   (let [header (.getBytes
@@ -111,26 +133,35 @@
         positive (arr/from-vec backend [0.3] [1 1 1 1])
         model {:comfyui/alphas-cumprod [0.9 0.7 0.5]
                :comfyui/denoise (fn [_sample _timestep conditioning] conditioning)}
-        run (fn [sampler-name seed]
+        run (fn [sampler-name scheduler-name seed]
               (let [workflow {"sample" {:class_type "KSampler"
                                          :inputs {:model model :positive positive
                                                   :negative negative
                                                   :latent_image sample :seed seed
                                                   :steps 2 :cfg 2.0
                                                   :sampler_name sampler-name
-                                                  :scheduler "normal"
+                                                  :scheduler scheduler-name
                                                   :denoise 1.0}}}]
                 (get-in (exec/execute {:registry registry} workflow)
                         [:results "sample" 0])))
-        ddim (run "ddim" 7)
-        ddim-again (run "ddim" 7)
-        ddim-other-seed (run "ddim" 8)
-        euler (run "euler" 7)
-        ancestral (run "euler_ancestral" 7)]
-    (is (= [1 1 1 1] (:shape ddim) (:shape euler) (:shape ancestral)))
+        ddim (run "ddim" "normal" 7)
+        ddim-again (run "ddim" "normal" 7)
+        ddim-other-seed (run "ddim" "normal" 8)
+        euler (run "euler" "normal" 7)
+        ancestral (run "euler_ancestral" "normal" 7)
+        dpmpp (run "dpmpp_2m" "normal" 7)
+        dpmpp-again (run "dpmpp_2m" "normal" 7)
+        dpmpp-karras (run "dpmpp_2m" "karras" 7)
+        dpmpp-karras-again (run "dpmpp_2m" "karras" 7)]
+    (is (= [1 1 1 1] (:shape ddim) (:shape euler) (:shape ancestral)
+           (:shape dpmpp)))
     (is (not= (arr/->vec sample) (arr/->vec ddim)))
     (is (not= (arr/->vec sample) (arr/->vec euler)))
     (is (not= (arr/->vec sample) (arr/->vec ancestral)))
+    (is (not= (arr/->vec sample) (arr/->vec dpmpp)))
+    (is (= (arr/->vec dpmpp) (arr/->vec dpmpp-again)))
+    (is (= (arr/->vec dpmpp-karras) (arr/->vec dpmpp-karras-again)))
+    (is (not= (arr/->vec dpmpp) (arr/->vec dpmpp-karras)))
     (is (= (arr/->vec ddim) (arr/->vec ddim-again)))
     (is (not= (arr/->vec ddim) (arr/->vec ddim-other-seed)))))
 
@@ -154,6 +185,100 @@
                                      :denoise 1.0}}}]
     (exec/execute {:registry registry} workflow)
     (is (= [501 501 1 1] @calls))))
+
+(deftest ksampler-partial-denoise-slices-normal-and-karras-schedules
+  (let [registry (node/registry (runtime/pack {:backend backend}))
+        calls (atom [])
+        zero (arr/zeros backend [1 1 1 1])
+        model {:comfyui/alphas-cumprod [0.95 0.8 0.6 0.4]
+               :comfyui/denoise (fn [_ timestep conditioning]
+                                  (swap! calls conj timestep) conditioning)}
+        run (fn [sampler scheduler-name denoise]
+              (reset! calls [])
+              (let [workflow
+                    {"sample" {:class_type "KSampler"
+                                :inputs {:model model :positive zero :negative zero
+                                         :latent_image zero :seed 31 :steps 2 :cfg 1.0
+                                         :sampler_name sampler
+                                         :scheduler scheduler-name
+                                         :denoise denoise}}}
+                    output (get-in (exec/execute {:registry registry :cache nil}
+                                                 workflow)
+                                   [:results "sample" 0])]
+                {:output output :calls @calls}))
+        normal-full (run "ddim" "normal" 1.0)
+        normal-partial (run "ddim" "normal" 0.5)
+        karras-full (run "dpmpp_2m" "karras" 1.0)
+        karras-partial (run "dpmpp_2m" "karras" 0.5)
+        karras-partial-again (run "dpmpp_2m" "karras" 0.5)]
+    (is (= [3 3 0 0] (:calls normal-full)))
+    (is (= [1 1 0 0] (:calls normal-partial)))
+    (is (< (first (:calls karras-partial))
+           (first (:calls karras-full))))
+    (is (= 4 (count (:calls karras-partial))))
+    (is (= (arr/->vec (:output karras-partial))
+           (arr/->vec (:output karras-partial-again))))
+    (is (not= (arr/->vec (:output normal-full))
+              (arr/->vec (:output normal-partial))))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"denoise in"
+         (let [workflow {"sample" {:class_type "KSampler"
+                                     :inputs {:model model :positive zero :negative zero
+                                              :latent_image zero :seed 1 :steps 2 :cfg 1.0
+                                              :sampler_name "ddim" :scheduler "normal"
+                                              :denoise 0.0}}}]
+           (exec/execute {:registry registry :cache nil} workflow))))))
+
+(deftest vae-encode-partial-sample-decode-runs-as-one-workflow
+  (let [input-dir (Files/createTempDirectory
+                   "comfyui-load-image-" (make-array FileAttribute 0))
+        image-path (.resolve input-dir "seed.png")
+        source (BufferedImage. 2 1 BufferedImage/TYPE_INT_ARGB)
+        _ (.setRGB source 0 0 (unchecked-int 0xff0080ff))
+        _ (.setRGB source 1 0 (unchecked-int 0x4040c080))
+        _ (ImageIO/write source "png" (.toFile image-path))
+        registry (node/registry
+                  (runtime/pack {:backend backend :input-directory input-dir}))
+        encoded-input (atom nil)
+        vae {:comfyui/component :vae
+             :comfyui/encode
+             (fn [nchw]
+               (reset! encoded-input nchw)
+               (arr/from-vec backend [0.1 0.2, 0.3 0.4, 0.5 0.6, 0.7 0.8]
+                             [1 4 1 2]))
+             :comfyui/decode
+             (fn [latent]
+               (let [values (arr/->vec latent)]
+                 (arr/from-vec backend (vec (take 6 values)) [1 3 1 2])))}
+        conditioning (arr/zeros backend [1 4 1 2])
+        model {:comfyui/alphas-cumprod [0.95 0.8 0.6 0.4]
+               :comfyui/denoise (fn [sample _ _]
+                                  (arr/zeros backend (:shape sample)))}
+        workflow
+        {"image" {:class_type "LoadImage" :inputs {:image "seed.png"}}
+         "encode" {:class_type "VAEEncode" :inputs {:pixels ["image" 0] :vae vae}}
+         "sample" {:class_type "KSampler"
+                    :inputs {:model model :positive conditioning
+                             :negative conditioning :latent_image ["encode" 0]
+                             :seed 77 :steps 2 :cfg 1.0
+                             :sampler_name "dpmpp_2m" :scheduler "karras"
+                             :denoise 0.5}}
+         "decode" {:class_type "VAEDecode"
+                    :inputs {:samples ["sample" 0] :vae vae}}}
+        result (exec/execute {:registry registry :cache nil} workflow)
+        mask (get-in result [:results "image" 1])
+        image (get-in result [:results "decode" 0])]
+    (is (= ["image" "encode" "sample" "decode"] (:executed result)))
+    (is (= [1 1 2] (:shape mask)))
+    (is (= [0.0 (/ 191.0 255.0)] (arr/->vec mask)))
+    (is (= [1 3 1 2] (:shape @encoded-input)))
+    (is (every? true?
+                (map #(< (Math/abs (- %1 %2)) 1.0e-12)
+                     [-1.0 (/ -127.0 255.0), (/ 1.0 255.0) (/ 129.0 255.0),
+                      1.0 (/ 1.0 255.0)]
+                     (arr/->vec @encoded-input))))
+    (is (= [1 1 2 3] (:shape image)))
+    (is (every? #(<= 0.0 % 1.0) (arr/->vec image)))))
 
 (deftest checkpoint-backed-unet-graph-runs-through-ksampler
   (let [prefix "model.diffusion_model."
