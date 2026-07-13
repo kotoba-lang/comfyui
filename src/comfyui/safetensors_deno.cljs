@@ -78,6 +78,8 @@
                            #(f backend % shape :f32))
                    "F16" (when-let [f (resolve 'num.deno-gpu/upload-f16-as-f32-byte-view)]
                            #(f backend % shape))
+                   "BF16" (when-let [f (resolve 'num.deno-gpu/upload-bf16-as-f32-byte-view)]
+                            #(f backend % shape))
                    nil)]
       (if upload
         (let [[start end] (get entry "data_offsets")
