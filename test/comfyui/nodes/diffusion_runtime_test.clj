@@ -126,11 +126,16 @@
         ddim-again (run "ddim" 7)
         ddim-other-seed (run "ddim" 8)
         euler (run "euler" 7)
-        ancestral (run "euler_ancestral" 7)]
-    (is (= [1 1 1 1] (:shape ddim) (:shape euler) (:shape ancestral)))
+        ancestral (run "euler_ancestral" 7)
+        dpmpp (run "dpmpp_2m" 7)
+        dpmpp-again (run "dpmpp_2m" 7)]
+    (is (= [1 1 1 1] (:shape ddim) (:shape euler) (:shape ancestral)
+           (:shape dpmpp)))
     (is (not= (arr/->vec sample) (arr/->vec ddim)))
     (is (not= (arr/->vec sample) (arr/->vec euler)))
     (is (not= (arr/->vec sample) (arr/->vec ancestral)))
+    (is (not= (arr/->vec sample) (arr/->vec dpmpp)))
+    (is (= (arr/->vec dpmpp) (arr/->vec dpmpp-again)))
     (is (= (arr/->vec ddim) (arr/->vec ddim-again)))
     (is (not= (arr/->vec ddim) (arr/->vec ddim-other-seed)))))
 

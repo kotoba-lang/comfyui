@@ -107,3 +107,22 @@
     (is (every? #(<= 0.0 (:sigma-down %) (:sigma-next %)) @events))
     (is (= (arr/->vec (:sample first-run))
            (arr/->vec (:sample second-run))))))
+
+(deftest dpmpp-2m-matches-k-diffusion-multistep-equation
+  (let [events (atom [])
+        result (scheduler/dpmpp-2m-sample
+                {:sample (arr/from-vec backend [2.0] [1])
+                 :alphas [0.92 0.8 0.6 0.4] :timesteps [3 2 1]
+                 :negative (arr/from-vec backend [0.1] [1])
+                 :positive (arr/from-vec backend [0.3] [1]) :cfg 2.0
+                 :denoise-fn (fn [_ _ conditioning] conditioning)
+                 :on-step #(swap! events conj %)})]
+    ;; Independently evaluated from k-diffusion's exponential 2M recurrence.
+    (is (approx? 1.3876275643042053
+                 (first (arr/->vec (:sample result)))))
+    (is (= [1 2 1] (mapv :order @events)))
+    (is (= [3 2 1] (mapv :timestep @events)))
+    (is (zero? (:sigma-next (last @events))))
+    (is (approx? (first (arr/->vec (:predicted-original-sample
+                                    (last @events))))
+                 (first (arr/->vec (:sample result)))))))

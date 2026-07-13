@@ -232,3 +232,53 @@
         (when on-step (on-step event))
         (recur next-sample (next remaining) (conj history event)))
       {:sample current :history history})))
+
+(defn dpmpp-2m-sample
+  "Deterministic k-diffusion DPM-Solver++(2M) sampling.
+
+  The denoiser predicts epsilon, so each call is converted to the denoised
+  estimate `x0 = x - sigma*epsilon`. Non-final steps use the exponential
+  first-order update, upgraded from the second step onward by the previous
+  denoised estimate. The terminal sigma-zero step returns x0 exactly."
+  [{:keys [sample alphas timesteps denoise-fn positive negative cfg on-step]
+    :or {cfg 1.0}}]
+  (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn))
+    (throw (ex-info "DPM++ 2M sampler requires sample, alphas, timesteps, and denoise-fn"
+                    {})))
+  (loop [current sample remaining (seq timesteps) old-denoised nil
+         previous-time nil history []]
+    (if-let [timestep (first remaining)]
+      (let [next-timestep (second remaining)
+            sigma (alpha->sigma (double (nth alphas timestep)))
+            sigma-next (if (some? next-timestep)
+                         (alpha->sigma (double (nth alphas next-timestep))) 0.0)
+            model-input (scale current (/ 1.0 (Math/sqrt (+ 1.0 (* sigma sigma)))))
+            epsilon (classifier-free-guidance
+                     (denoise-fn model-input timestep negative)
+                     (denoise-fn model-input timestep positive) cfg)
+            denoised (t/sub current (scale epsilon sigma))
+            time (- (Math/log sigma))
+            next-sample
+            (if (zero? sigma-next)
+              denoised
+              (let [next-time (- (Math/log sigma-next))
+                    h (- next-time time)
+                    effective-denoised
+                    (if old-denoised
+                      (let [h-last (- time previous-time)
+                            r (/ h-last h)
+                            previous-factor (/ 1.0 (* 2.0 r))]
+                        (t/sub (scale denoised (+ 1.0 previous-factor))
+                               (scale old-denoised previous-factor)))
+                      denoised)
+                    ratio (/ sigma-next sigma)
+                    denoised-factor (- (Math/expm1 (- h)))]
+                (t/add (scale current ratio)
+                       (scale effective-denoised denoised-factor))))
+            event {:timestep timestep :sigma sigma :sigma-next sigma-next
+                   :order (if (and old-denoised (pos? sigma-next)) 2 1)
+                   :predicted-original-sample denoised :sample next-sample}]
+        (when on-step (on-step event))
+        (recur next-sample (next remaining) denoised time
+               (conj history event)))
+      {:sample current :history history})))

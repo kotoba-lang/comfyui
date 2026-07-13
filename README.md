@@ -134,8 +134,11 @@ execution while retaining the upstream class names and wire types:
   discrete, or Euler ancestral. Euler converts cumulative alpha to sigma,
   scales model input, and integrates the epsilon ODE through final sigma zero;
   the ancestral variant splits each target into sigma-down plus seeded
-  sigma-up noise. The current executable subset is
-  `ddim|euler|euler_ancestral` + `normal` + full denoise; unsupported sampler
+  sigma-up noise. DPM++ 2M follows k-diffusion's exponential multistep
+  recurrence, retains the previous denoised estimate for its second-order
+  correction, and handles terminal sigma zero as an exact denoised-x0 step.
+  The current executable subset is
+  `ddim|euler|euler_ancestral|dpmpp_2m` + `normal` + full denoise; unsupported sampler
   combinations fail explicitly instead of silently changing algorithms.
 
 ```clojure
@@ -276,8 +279,8 @@ while Euler retains sigma-scaled initialization.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
-upstream Diffusers, and additional
-ancestral/DPM sampler families, additional VAE variants, mixed precision, and an installed real
+upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,
+Karras/exponential sigma schedules, additional VAE variants, mixed precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 
