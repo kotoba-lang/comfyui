@@ -42,6 +42,10 @@
    :main-opts ["-m" "cljs.main"
                "-co" "{:optimizations :simple :target :nodejs :main comfyui.nodes.toy-diffusion-metal-verify :output-to \"target/toy-diffusion-metal-verify.cjs\"}"
                "-c" "comfyui.nodes.toy-diffusion-metal-verify"]}
+  :real-diffusers-unet-verify
+  {:extra-paths ["test"]
+   :jvm-opts ["-Xms128m" "-Xmx1g"]
+   :main-opts ["-m" "comfyui.real-diffusers-unet-verify"]}
   ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
   :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"

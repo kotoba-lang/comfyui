@@ -443,3 +443,145 @@
         {:mode :dual :encoders (vec (take 2 specs))})
 
       :else nil)))
+
+;; Diffusers stores the same UNet structure under down_blocks/up_blocks names
+;; instead of CompVis input_blocks/output_blocks. Keep those real checkpoint
+;; names in the executable graph so tensors remain lazily mmap-backed.
+(defn- diffusers-resblock [names prefix]
+  (let [optional (fn [suffix] (let [name (str prefix suffix)] (when (names name) name)))
+        layer {:op :resblock :groups 32
+               :in-norm-weight (str prefix "norm1.weight")
+               :in-norm-bias (str prefix "norm1.bias")
+               :in-conv-weight (str prefix "conv1.weight")
+               :in-conv-bias (str prefix "conv1.bias")
+               :embedding-weight (str prefix "time_emb_proj.weight")
+               :embedding-bias (str prefix "time_emb_proj.bias")
+               :out-norm-weight (str prefix "norm2.weight")
+               :out-norm-bias (str prefix "norm2.bias")
+               :out-conv-weight (str prefix "conv2.weight")
+               :out-conv-bias (str prefix "conv2.bias")
+               :skip-weight (optional "conv_shortcut.weight")
+               :skip-bias (optional "conv_shortcut.bias")}
+        required (remove nil? (vals (dissoc layer :op :groups)))]
+    (when (every? names required) layer)))
+
+(defn- diffusers-spatial [checkpoint names prefix head-dim]
+  (let [base (str prefix "transformer_blocks.0.")
+        hidden (first (shape-at checkpoint (str base "attn1.to_q.weight")))
+        heads (when (and hidden (pos-int? head-dim) (zero? (mod hidden head-dim)))
+                (quot hidden head-dim))
+        block {:heads heads
+               :norm1-weight (str base "norm1.weight") :norm1-bias (str base "norm1.bias")
+               :self-attention (attention-spec names (str base "attn1."))
+               :norm2-weight (str base "norm2.weight") :norm2-bias (str base "norm2.bias")
+               :cross-attention (attention-spec names (str base "attn2."))
+               :norm3-weight (str base "norm3.weight") :norm3-bias (str base "norm3.bias")
+               :feed-forward {:project-weight (str base "ff.net.0.proj.weight")
+                              :project-bias (str base "ff.net.0.proj.bias")
+                              :output-weight (str base "ff.net.2.weight")
+                              :output-bias (str base "ff.net.2.bias")}}
+        layer {:op :spatial-transformer :groups 32
+               :norm-weight (str prefix "norm.weight") :norm-bias (str prefix "norm.bias")
+               :proj-in-weight (str prefix "proj_in.weight")
+               :proj-in-bias (str prefix "proj_in.bias")
+               :proj-out-weight (str prefix "proj_out.weight")
+               :proj-out-bias (str prefix "proj_out.bias")
+               :linear-projection? (= 2 (count (shape-at checkpoint (str prefix "proj_in.weight"))))
+               :blocks [block]}
+        required (concat (remove nil? ((juxt :norm-weight :norm-bias :proj-in-weight
+                                             :proj-in-bias :proj-out-weight :proj-out-bias) layer))
+                         ((juxt :norm1-weight :norm1-bias :norm2-weight :norm2-bias
+                                :norm3-weight :norm3-bias) block)
+                         (remove nil? (vals (:self-attention block)))
+                         (remove nil? (vals (:cross-attention block)))
+                         (vals (:feed-forward block)))]
+    (when (and (pos-int? heads) (every? names required)) layer)))
+
+(defn infer-diffusers-unet-spec
+  "Lower a Diffusers UNet2DConditionModel safetensors file plus its config.json
+  map into the same executable graph vocabulary used by CompVis checkpoints."
+  [checkpoint config]
+  (let [names (set (safe/tensor-names checkpoint))
+        getc #(or (get config %) (get config (keyword %)))
+        block-channels (vec (getc "block_out_channels"))
+        layers-per-block (long (getc "layers_per_block"))
+        head-dim (long (getc "attention_head_dim"))
+        down-types (vec (getc "down_block_types")) up-types (vec (getc "up_block_types"))
+        skip-stack (atom []) skip-id (atom 0)
+        save! (fn [] (let [name (keyword (str "diffusers-skip-" (swap! skip-id inc)))]
+                       (swap! skip-stack conj name) {:op :save :name name}))
+        pop-skip! (fn [] (let [name (peek @skip-stack)]
+                           (swap! skip-stack pop) name))
+        initial [{:op :timestep-vector
+                  :first-weight "time_embedding.linear_1.weight"
+                  :first-bias "time_embedding.linear_1.bias"
+                  :second-weight "time_embedding.linear_2.weight"
+                  :second-bias "time_embedding.linear_2.bias"}
+                 {:op :conv2d :weight "conv_in.weight" :bias "conv_in.bias" :padding 1}
+                 (save!)]
+        encoder
+        (vec
+         (mapcat
+          (fn [block]
+            (let [cross? (str/includes? (nth down-types block) "CrossAttn")
+                  body (mapcat
+                        (fn [layer]
+                          (let [root (str "down_blocks." block ".resnets." layer ".")
+                                res (diffusers-resblock names root)
+                                attn (when cross?
+                                       (diffusers-spatial checkpoint names
+                                                           (str "down_blocks." block
+                                                                ".attentions." layer ".") head-dim))]
+                            (concat [res] (when attn [attn]) [(save!)])))
+                        (range layers-per-block))
+                  downsample (when (< block (dec (count block-channels)))
+                               [{:op :conv2d
+                                 :weight (str "down_blocks." block ".downsamplers.0.conv.weight")
+                                 :bias (str "down_blocks." block ".downsamplers.0.conv.bias")
+                                 :stride 2 :padding 1}
+                                (save!)])]
+              (concat body downsample)))
+          (range (count block-channels))))
+        middle [(diffusers-resblock names "mid_block.resnets.0.")
+                (diffusers-spatial checkpoint names "mid_block.attentions.0." head-dim)
+                (diffusers-resblock names "mid_block.resnets.1.")]
+        decoder
+        (vec
+         (mapcat
+          (fn [block]
+            (let [cross? (str/includes? (nth up-types block) "CrossAttn")
+                  resnet-count (inc layers-per-block)
+                  body (mapcat
+                        (fn [layer]
+                          (let [skip (pop-skip!)
+                                root (str "up_blocks." block ".resnets." layer ".")
+                                res (diffusers-resblock names root)
+                                attn (when cross?
+                                       (diffusers-spatial checkpoint names
+                                                           (str "up_blocks." block
+                                                                ".attentions." layer ".") head-dim))]
+                            (concat [{:op :cat-saved :name skip :axis 1} res]
+                                    (when attn [attn]))))
+                        (range resnet-count))
+                  upsample (when (< block (dec (count block-channels)))
+                             [{:op :upsample :scale-factor 2}
+                              {:op :conv2d
+                               :weight (str "up_blocks." block ".upsamplers.0.conv.weight")
+                               :bias (str "up_blocks." block ".upsamplers.0.conv.bias")
+                               :padding 1}])]
+              (concat body upsample)))
+          (range (count block-channels))))
+        final [{:op :groupnorm :groups 32 :weight "conv_norm_out.weight"
+                :bias "conv_norm_out.bias"}
+               {:op :silu}
+               {:op :conv2d :weight "conv_out.weight" :bias "conv_out.bias" :padding 1}]
+        layers (vec (concat initial encoder middle decoder final))]
+    (when (and (= "UNet2DConditionModel" (getc "_class_name"))
+               (seq block-channels) (= (count down-types) (count block-channels))
+               (= (count up-types) (count block-channels))
+               (empty? @skip-stack) (every? some? layers))
+      {:architecture :diffusers-unet2d-condition
+       :in-channels (long (getc "in_channels")) :out-channels (long (getc "out_channels"))
+       :sample-size (long (getc "sample_size"))
+       :cross-attention-dim (long (getc "cross_attention_dim"))
+       :layers layers})))
