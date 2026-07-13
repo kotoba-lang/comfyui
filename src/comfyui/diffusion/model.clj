@@ -13,7 +13,7 @@
 
 (def ^:private supported-ops
   #{:conv2d :groupnorm :silu :save :add-saved :cat-saved :upsample
-    :add-conditioning :cross-attention :timestep-bias :timestep-embedding})
+    :scale :add-conditioning :cross-attention :timestep-bias :timestep-embedding})
 
 (defn- fail [message data]
   (throw (ex-info (str "comfyui.diffusion.model: " message) data)))
@@ -95,13 +95,8 @@
             {:projected (:shape projected) :channels channels}))
     (t/add value (t/reshape projected [1 channels 1 1]))))
 
-(defn compile-denoiser
-  "Compile `spec` into `(fn [sample timestep conditioning] epsilon)`.
-
-  Required spec key: `:layers`, a vector of op maps. `component` must expose
-  `:comfyui/read-tensor`; weights are read lazily on `backend`. Output shape is
-  required to equal sample shape, matching epsilon-prediction KSampler models."
-  [component backend {:keys [layers] :as spec}]
+(defn- compile-graph
+  [component backend {:keys [layers] :as spec} same-shape?]
   (when-not (and backend (fn? (:comfyui/read-tensor component))
                  (vector? layers) (seq layers))
     (fail "model spec requires backend, MODEL tensor reader, and non-empty :layers"
@@ -141,6 +136,12 @@
                                              (or (:eps layer) 1.0e-5)))
 
                    :silu (assoc state :value (t/silu value))
+
+                   :scale
+                   (assoc state :value
+                          (nm/scal! (double (:factor layer))
+                                    (arr/from-vec (:backend value)
+                                                  (arr/->vec value) (:shape value))))
 
                    :save
                    (assoc-in state [:saved (:name layer)] value)
@@ -189,8 +190,24 @@
                      (assoc state :value (t/add value scalar)))))
                initial layers)
               output (:value result)]
-          (when-not (= (:shape sample) (:shape output))
+          (when (and same-shape? (not= (:shape sample) (:shape output)))
             (fail "epsilon output shape must equal sample shape"
                   {:sample (:shape sample) :output (:shape output)}))
           output))
       {:comfyui/model-spec spec :comfyui/tensor-cache cache})))
+
+(defn compile-denoiser
+  "Compile `spec` into `(fn [sample timestep conditioning] epsilon)`.
+
+  Required spec key: `:layers`, a vector of op maps. `component` must expose
+  `:comfyui/read-tensor`; weights are read lazily on `backend`. Output shape is
+  required to equal sample shape, matching epsilon-prediction KSampler models."
+  [component backend spec]
+  (compile-graph component backend spec true))
+
+(defn compile-decoder
+  "Compile a checkpoint-backed graph into `(fn [latent] image)`. Unlike a
+  denoiser, a decoder may change channel and spatial dimensions."
+  [component backend spec]
+  (let [graph (compile-graph component backend spec false)]
+    (with-meta (fn [latent] (graph latent 0 nil)) (meta graph))))

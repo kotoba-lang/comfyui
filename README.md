@@ -158,9 +158,17 @@ with eight trained-parameter tensors, loads it through `CheckpointLoaderSimple`,
 runs a U-shaped down/middle/up/skip denoiser under positive and negative CFG,
 and completes two DDIM steps through the actual graph executor.
 
+The same graph compiler now builds checkpoint-backed VAE decoders whose output
+may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
+decoder conv/normalization/upsampling, converts NCHW RGB from `[-1,1]` to
+clamped NHWC `[0,1]`, and `SaveImage` writes each batch item through the JVM PNG
+codec. The end-to-end runtime fixture executes
+`CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
+32×32 PNG, and verifies its signature and output metadata.
+
 This is not yet a complete SD/SDXL render: upstream architecture detection,
 CLIP tokenization/encoding, complete production block/config mapping, non-DDIM sampler
-families, VAE decode, image codec/save, mixed precision, and an installed real
+families, full upstream VAE architecture mapping, mixed precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 

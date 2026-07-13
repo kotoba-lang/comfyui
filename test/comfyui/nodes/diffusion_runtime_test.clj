@@ -137,8 +137,15 @@
           {:shape [4 8 1 1]
            :values (vec (for [oc (range 4) ic (range 8)]
                           (if (or (= ic oc) (= ic (+ 4 oc))) 0.5 0.0)))}]
-         [(str prefix "output.bias") {:shape [4] :values [0 0 0 0]}]]
+         [(str prefix "output.bias") {:shape [4] :values [0 0 0 0]}]
+         ["first_stage_model.decoder.output.weight"
+          {:shape [3 4 1 1]
+           :values [1 0 0 0, 0 1 0 0, 0 0 1 0]}]
+         ["first_stage_model.decoder.output.bias"
+          {:shape [3] :values [0.01 0.02 0.03]}]]
         path (f32-checkpoint tensors)
+        output-dir (Files/createTempDirectory "comfyui-output-"
+                                              (make-array FileAttribute 0))
         spec {:layers
               [{:op :conv2d :weight (str prefix "input.weight")
                 :bias (str prefix "input.bias")}
@@ -154,10 +161,20 @@
                 :bias (str prefix "output.bias")}
                {:op :add-conditioning}
                {:op :timestep-bias :scale 0.001}]}
+        vae-spec {:layers
+                  [{:op :scale :factor (/ 1.0 0.18215)}
+                   {:op :upsample :scale-factor 2}
+                   {:op :upsample :scale-factor 2}
+                   {:op :upsample :scale-factor 2}
+                   {:op :conv2d
+                    :weight "first_stage_model.decoder.output.weight"
+                    :bias "first_stage_model.decoder.output.bias"}]}
         registry (node/registry
                   (runtime/pack {:backend backend
                                  :resolve-checkpoint (constantly path)
                                  :model-spec spec
+                                 :vae-spec vae-spec
+                                 :output-directory output-dir
                                  :alphas-cumprod [0.95 0.8 0.6]}))
         sample (arr/from-vec backend
                              (mapv #(- (* 0.03 %) 0.4) (range 64))
@@ -171,23 +188,42 @@
                                      :positive positive :negative negative
                                      :latent_image sample :seed 19 :steps 2 :cfg 3.0
                                      :sampler_name "ddim" :scheduler "normal"
-                                     :denoise 1.0}}}]
+                                     :denoise 1.0}}
+                  "decode" {:class_type "VAEDecode"
+                            :inputs {:samples ["sample" 0]
+                                     :vae ["load" 2]}}
+                  "save" {:class_type "SaveImage"
+                          :inputs {:images ["decode" 0]
+                                   :filename_prefix "render"}}}]
     (try
       (let [result (exec/execute {:registry registry} workflow)
             model (get-in result [:results "load" 0])
+            vae (get-in result [:results "load" 2])
             output (get-in result [:results "sample" 0])
+            image (get-in result [:results "decode" 0])
+            saved (get-in result [:results "save" 0 :images 0])
+            png-path (.resolve output-dir "render_00000.png")
             denoise (:comfyui/denoise model)
             unconditional (denoise sample 2 negative)
             conditional (denoise sample 2 positive)
             later-timestep (denoise sample 1 positive)
             cache (:comfyui/tensor-cache (meta (:comfyui/denoise model)))]
-        (is (= ["load" "sample"] (:executed result)))
+        (is (= ["load" "sample" "decode" "save"] (:executed result)))
         (is (= [1 4 4 4] (:shape output)))
+        (is (= [1 32 32 3] (:shape image)))
+        (is (every? #(<= 0.0 % 1.0) (arr/->vec image)))
+        (is (= (str png-path) (:path saved)))
+        (is (Files/exists png-path (make-array java.nio.file.LinkOption 0)))
+        (is (= [-119 80 78 71 13 10 26 10]
+               (mapv int (take 8 (Files/readAllBytes png-path)))))
         (is (not= (arr/->vec sample) (arr/->vec output)))
         (is (not= (arr/->vec unconditional) (arr/->vec conditional)))
         (is (not= (arr/->vec conditional) (arr/->vec later-timestep)))
         (is (= 8 (count @cache)))
         (is (= spec (:comfyui/model-spec model)))
+        (is (= vae-spec (:comfyui/model-spec vae)))
         (safe/close! (:comfyui/checkpoint model)))
       (finally
+        (Files/deleteIfExists (.resolve output-dir "render_00000.png"))
+        (Files/deleteIfExists output-dir)
         (Files/deleteIfExists path)))))
