@@ -38,7 +38,7 @@
   (let [half (quot embedding-dim 2)
         denominator (max 1 (dec half))
         frequencies (mapv #(Math/exp (* -1.0 (Math/log 10000.0)
-                                           (/ % denominator)))
+                                     (/ % denominator)))
                           (range half))]
     (arr/from-vec
      backend
@@ -166,7 +166,7 @@
 (defn- gelu [value]
   (* 0.5 value
      (+ 1.0 (Math/tanh (* 0.7978845608
-                          (+ value (* 0.044715 value value value)))))))
+                     (+ value (* 0.044715 value value value)))))))
 
 (defn- geglu [x tensor! spec]
   (let [projected (linear x (tensor! (:project-weight spec))
@@ -287,7 +287,7 @@
             (fail "timestep embedding input dimension must be even and >= 4"
                   {:dimension embedding-dim}))
         frequencies (mapv #(Math/exp (* -1.0 (Math/log 10000.0)
-                                           (/ % (dec half))))
+                                     (/ % (dec half))))
                           (range half))
         angles (mapv #(* (double timestep) %) frequencies)
         embedding (arr/from-vec (:backend value)
