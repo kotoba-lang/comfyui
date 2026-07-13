@@ -238,7 +238,6 @@
             (fail "attention heads must divide channels"
                   {:channels channels :heads heads}))
         sequence (* height width)
-        head-dim (quot channels heads)
         x-sequence (t/reshape (t/transpose value [0 2 3 1])
                               [batch sequence channels])
         projection (fn [prefix source]
@@ -247,22 +246,16 @@
         q (projection "query" x-sequence)
         k (projection "key" condition)
         v (projection "value" condition)
-        tokens (second (:shape condition))
-        split (fn [tensor length]
-                (t/transpose (t/reshape tensor [batch length heads head-dim])
-                             [0 2 1 3]))
-        qh (split q sequence) kh (split k tokens) vh (split v tokens)
-        scores (t/matmul qh (t/transpose kh [0 1 3 2]))
-        scaled (nm/scal! (/ 1.0 (Math/sqrt head-dim)) scores)
-        probabilities (t/softmax scaled)
-        attended (t/matmul probabilities vh)
-        merged (t/reshape (t/transpose attended [0 2 1 3])
-                          [batch sequence channels])
-        projected (linear merged (tensor! (:output-weight layer))
+        attended (t/multi-head-attention q k v heads)
+        projected (linear attended (tensor! (:output-weight layer))
                           (tensor! (:output-bias layer)))
         nchw (t/transpose (t/reshape projected [batch height width channels])
-                          [0 3 1 2])]
-    (if (false? (:residual layer)) nchw (nm/add value nchw))))
+                          [0 3 1 2])
+        result (if (false? (:residual layer)) nchw (nm/add value nchw))]
+    (doseq [temporary (cond-> [x-sequence q k v attended projected]
+                        (not (false? (:residual layer))) (conj nchw))]
+      (arr/release! temporary))
+    result))
 
 (defn- vae-attention [value tensor! layer]
   (let [[batch channels height width :as shape] (:shape value)
@@ -280,17 +273,19 @@
         query (projection "query")
         key (projection "key")
         value-projection (projection "value")
-        scores (nm/scal! (/ 1.0 (Math/sqrt channels))
-                         (t/matmul query (t/transpose key [0 2 1])))
-        attended (t/matmul (t/softmax scores) value-projection)
+        attended (t/multi-head-attention query key value-projection 1)
         projected (linear attended (tensor! (:output-weight layer))
                           (tensor! (:output-bias layer)))
         output (t/transpose (t/reshape projected [batch height width channels])
-                            [0 3 1 2])]
+                            [0 3 1 2])
+        result (nm/add value output)]
     (when-not (= shape (:shape output))
       (fail "VAE attention changed tensor shape"
             {:input shape :output (:shape output)}))
-    (nm/add value output)))
+    (doseq [temporary [normalized sequence query key value-projection
+                       attended projected output]]
+      (arr/release! temporary))
+    result))
 
 (defn- timestep-embedding [value timestep tensor! layer]
   (let [first-weight (tensor! (:first-weight layer))

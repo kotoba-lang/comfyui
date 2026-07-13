@@ -205,6 +205,9 @@ LayerNorm, GEGLU slicing/GELU/gating, rank-3/4 axis permutations, broadcast
 batched matmul, and fused self/cross multi-head attention no longer materialize
 host vectors. The Metal verifier executes a complete self-attention →
 cross-attention → GEGLU block and compares its output with the CPU oracle.
+VAE spatial attention and the legacy `:cross-attention` lowering use the same
+fused device kernel, avoiding their former score-matrix host softmax path and
+releasing Q/K/V and projection temporaries after their final dispatch.
 
 `comfyui.diffusion.architecture` inspects tensor names/shapes without decoding
 payloads and identifies SD1 (768 context), SD2 (1024), SDXL base (label

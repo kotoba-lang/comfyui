@@ -47,6 +47,41 @@
           (if (= (quot index size) (mod index size)) scale 0.0))
         (range (* size size))))
 
+(defn- vae-attention [backend]
+  (let [matrix (arr/from-vec backend (identity-values 2 0.5) [2 2])
+        zeros (arr/zeros backend [2])
+        arrays {"norm.w" (arr/from-vec backend [1.0 1.0] [2])
+                "norm.b" zeros
+                "q.w" matrix "q.b" zeros "k.w" matrix "k.b" zeros
+                "v.w" matrix "v.b" zeros "out.w" matrix "out.b" zeros}
+        decoder (model/compile-decoder
+                 {:comfyui/read-tensor (fn [_ name] (get arrays name))}
+                 backend
+                 {:layers [{:op :vae-attention :groups 1
+                            :norm-weight "norm.w" :norm-bias "norm.b"
+                            :query-weight "q.w" :query-bias "q.b"
+                            :key-weight "k.w" :key-bias "k.b"
+                            :value-weight "v.w" :value-bias "v.b"
+                            :output-weight "out.w" :output-bias "out.b"}]})]
+    (decoder (arr/from-vec backend [0.2 -0.1 0.7 0.3] [1 2 1 2]))))
+
+(defn- legacy-cross-attention [backend]
+  (let [matrix (arr/from-vec backend (identity-values 2 0.5) [2 2])
+        zeros (arr/zeros backend [2])
+        arrays {"q.w" matrix "q.b" zeros "k.w" matrix "k.b" zeros
+                "v.w" matrix "v.b" zeros "out.w" matrix "out.b" zeros}
+        denoise (model/compile-denoiser
+                 {:comfyui/read-tensor (fn [_ name] (get arrays name))}
+                 backend
+                 {:layers [{:op :cross-attention :heads 1
+                            :query-weight "q.w" :query-bias "q.b"
+                            :key-weight "k.w" :key-bias "k.b"
+                            :value-weight "v.w" :value-bias "v.b"
+                            :output-weight "out.w" :output-bias "out.b"}]})]
+    (denoise (arr/from-vec backend [0.2 -0.1 0.7 0.3] [1 2 1 2]) 0
+             {:tensor (arr/from-vec backend [0.1 0.4, -0.2 0.5, 0.3 -0.1]
+                                            [1 3 2])})))
+
 (defn- spatial-transformer [backend]
   (let [matrix (arr/from-vec backend (identity-values 2 0.2) [2 2])
         zeros (arr/zeros backend [2])
@@ -108,7 +143,9 @@
         expected-nchw-values (arr/->vec expected-nchw)
         expected-image-values (arr/->vec expected-image)
         expected-transformer (arr/->vec (spatial-transformer cpu-backend))
-        expected-batched (arr/->vec (broadcast-batched-matmul cpu-backend))]
+        expected-batched (arr/->vec (broadcast-batched-matmul cpu-backend))
+        expected-vae-attention (arr/->vec (vae-attention cpu-backend))
+        expected-cross-attention (arr/->vec (legacy-cross-attention cpu-backend))]
     (-> (dg/request-device)
         (.then
          (fn [request]
@@ -120,7 +157,9 @@
                #js [(arr/->vec output) (arr/->vec (denoise gpu))
                     (arr/->vec gpu-nchw) (arr/->vec gpu-image)
                     (arr/->vec (spatial-transformer gpu))
-                    (arr/->vec (broadcast-batched-matmul gpu))])
+                    (arr/->vec (broadcast-batched-matmul gpu))
+                    (arr/->vec (vae-attention gpu))
+                    (arr/->vec (legacy-cross-attention gpu))])
               (fn [results]
                 (let [actual (aget results 0)
                       actual-denoise (aget results 1)
@@ -128,6 +167,8 @@
                       actual-image (aget results 3)
                       actual-transformer (aget results 4)
                       actual-batched (aget results 5)
+                      actual-vae-attention (aget results 6)
+                      actual-cross-attention (aget results 7)
                       close? (fn [expected actual]
                                (and (= (count expected) (count actual))
                                     (every? true?
@@ -142,7 +183,9 @@
                            (close? expected-nchw-values actual-nchw)
                            (close? expected-image-values actual-image)
                            (close? expected-transformer actual-transformer)
-                           (close? expected-batched actual-batched))
+                           (close? expected-batched actual-batched)
+                           (close? expected-vae-attention actual-vae-attention)
+                           (close? expected-cross-attention actual-cross-attention))
                     (throw
                      (ex-info "Metal liveness graphs differ from CPU"
                               {:shape (:shape output)
@@ -156,8 +199,12 @@
                                :expected-transformer expected-transformer
                                :actual-transformer actual-transformer
                                :expected-batched expected-batched
-                               :actual-batched actual-batched})))
-                  (println "OK VAE + image-boundary + SpatialTransformer graphs match CPU with"
+                               :actual-batched actual-batched
+                               :expected-vae-attention expected-vae-attention
+                               :actual-vae-attention actual-vae-attention
+                               :expected-cross-attention expected-cross-attention
+                               :actual-cross-attention actual-cross-attention})))
+                  (println "OK VAE attention + image-boundary + SpatialTransformer graphs match CPU with"
                            "GPUBuffer.destroy on"
                            (dg/adapter-description request))))))))
         (.catch
