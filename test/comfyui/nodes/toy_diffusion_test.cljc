@@ -48,3 +48,40 @@
                          :inputs {:image image :kernel kernel}}}]
       (is (thrown? #?(:clj Exception :cljs js/Error)
                    (exec/execute {:registry (node/registry) :cache nil} workflow))))))
+
+(deftest toy-diffusion-step-mc-runs-real-compute-through-the-real-executor
+  (testing "ToyDiffusionStepMC — the multi-channel/multi-head twin — through
+            the real executor. Same 2-in/2-out-channel conv2d-mc fixture
+            num.tensor-test hand-verifies: conv+relu gives channel0=[5 6 8 9],
+            channel1=[10 12 16 18] (as [C_out oh ow]=[2 2 2]). Reinterpreted
+            as 4 spatial tokens embedded in 2 dims (one value from each
+            channel per position), attention's output per TOKEN is a convex
+            combination of all 4 tokens' [ch0 ch1] pairs — so after
+            transposing back to [C_out oh ow], every channel-0 output value
+            must land in [min ch0, max ch0] = [5 9], and every channel-1
+            value in [min ch1, max ch1] = [10 18]."
+    (let [reg (node/register! (node/registry) toy/pack-mc)
+          image (arr/from-vec backend (concat (range 1 10) (repeat 9 1)) [2 3 3])
+          kernel (arr/from-vec backend [1 0 0 0  1 1 1 1
+                                        0 0 0 2  0 0 0 0] [2 2 2 2])
+          workflow {"1" {:class_type "ToyDiffusionStepMC"
+                         :inputs {:image image :kernel kernel :num-heads 1}}}
+          {:keys [results executed]} (exec/execute {:registry reg :cache nil} workflow)]
+      (is (= ["1"] executed))
+      (let [[out] (get results "1")]
+        (is (= [2 2 2] (:shape out)))
+        (let [vs (arr/->vec out)
+              ch0 (subvec vs 0 4) ch1 (subvec vs 4 8)]
+          (is (every? #(<= 5.0 % 9.0) ch0) (str "channel 0 out of bound: " ch0))
+          (is (every? #(<= 10.0 % 18.0) ch1) (str "channel 1 out of bound: " ch1)))))))
+
+(deftest toy-diffusion-step-mc-num-heads-must-divide-channels
+  (testing "num-heads not dividing C_out throws, not a silent wrong shape"
+    (let [reg (node/register! (node/registry) toy/pack-mc)
+          image (arr/from-vec backend (concat (range 1 10) (repeat 9 1)) [2 3 3])
+          kernel (arr/from-vec backend [1 0 0 0  1 1 1 1
+                                        0 0 0 2  0 0 0 0] [2 2 2 2])
+          workflow {"1" {:class_type "ToyDiffusionStepMC"
+                         :inputs {:image image :kernel kernel :num-heads 3}}}]
+      (is (thrown? #?(:clj Exception :cljs js/Error)
+                   (exec/execute {:registry reg :cache nil} workflow))))))

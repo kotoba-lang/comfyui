@@ -33,7 +33,18 @@
   ToyDiffusionStep uses. Genuinely runs on real Metal when given a live
   `num.deno-gpu` backend NDArray — see `test/comfyui/nodes/toy_diffusion_metal_verify.cljs`.
   ToyDiffusionStep (CPU-sync) is UNCHANGED and still the node to reach for
-  when a caller just wants `execute`, not `execute-async`."
+  when a caller just wants `execute`, not `execute-async`.
+
+  ToyDiffusionStepMC (`pack-mc`, 2026-07-13 \"raise the maturity\" loop): a
+  MORE realistic UNet-block shape than `ToyDiffusionStep` — multi-channel
+  conv2d (`num.tensor/conv2d-mc`) into multi-head self-attention
+  (`num.tensor/multi-head-attention`), the actual channel/head-count axes a
+  real diffusion UNet varies. `[C_out H W]` conv output is reinterpreted as
+  `oh*ow` spatial TOKENS each embedded in `C_out` dims (the standard
+  NCHW→spatial-token flattening: `reshape` [zero-copy] then `transpose`
+  [real data move] — the reverse afterward restores `[C_out oh ow]`). CPU-
+  sync only for now; no Metal-async twin yet (conv2d-mc/multi-head-attention
+  don't have `num.tensor-async` counterparts — see that ns's own scope)."
   (:require [num.core :as nm]
             [num.tensor :as t]
             [num.tensor-async :as ta]))
@@ -86,3 +97,30 @@
                            (.then (ta/attention-async flat flat flat)
                                   (fn [attended]
                                     [(t/reshape attended [oh ow])])))))))])
+
+(def toy-diffusion-step-mc
+  "A multi-channel conv2d + relu + multi-head self-attention step. Inputs:
+    :image     — [C_in H W] multi-channel latent
+    :kernel    — [C_out C_in kh kw] conv kernel
+    :num-heads — attention head count, must evenly divide C_out (default 1)
+  Output: `[C_out oh ow]`."
+  (t' "ToyDiffusionStepMC" "diffusion-toy"
+      {:image {:type "LATENT"} :kernel {:type "*"}
+       :num-heads {:type "INT" :default 1}}
+      [{:name "LATENT" :type "LATENT"}]))
+
+(def pack-mc
+  "The multi-channel/multi-head twin of `pack` — CPU-sync only (no Metal-
+  async twin yet, see this ns's own docstring)."
+  [(assoc toy-diffusion-step-mc
+          :fn (fn [{:keys [image kernel num-heads]}]
+                (let [conv (nm/relu (t/conv2d-mc image kernel))
+                      [cout oh ow] (:shape conv)
+                      ;; [C_out oh ow] -> [C_out oh*ow] (zero-copy reshape)
+                      ;; -> [oh*ow C_out] (real transpose: each spatial
+                      ;; position becomes one token embedded in C_out dims)
+                      tokens (t/transpose (t/reshape conv [cout (* oh ow)]))
+                      attended (t/multi-head-attention tokens tokens tokens
+                                                       (or num-heads 1))
+                      back (t/transpose attended)]
+                  [(t/reshape back [cout oh ow])])))])
