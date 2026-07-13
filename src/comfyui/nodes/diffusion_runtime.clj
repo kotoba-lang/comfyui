@@ -74,7 +74,8 @@
 
   The MODEL/CLIP/VAE maps share one lazy SafeTensorFile. The host owns its
   lifecycle and closes `:comfyui/checkpoint` when the workflow/model unloads."
-  [{:keys [backend resolve-checkpoint model-spec vae-spec clip-spec alphas-cumprod
+  [{:keys [backend resolve-checkpoint model-spec diffusers-config
+           vae-spec clip-spec alphas-cumprod
            output-directory clip-tokenizer]
     :or {resolve-checkpoint identity}}]
   [{:type "CheckpointLoaderSimple"
@@ -85,14 +86,21 @@
               {:name "VAE" :type "VAE"}]
     :fn (fn [{:keys [ckpt_name]}]
           (let [checkpoint (safe/open-file (resolve-checkpoint ckpt_name))
+                resolved-diffusers-config
+                (if (fn? diffusers-config)
+                  (diffusers-config ckpt_name checkpoint) diffusers-config)
                 model-component (component checkpoint :model
-                                           ["model.diffusion_model."
-                                            "diffusion_model." "unet."])
+                                           (cond-> ["model.diffusion_model."
+                                                    "diffusion_model." "unet."]
+                                             resolved-diffusers-config (conj "")))
                 architecture-info (architecture/infer checkpoint)
                 configured-spec (if (fn? model-spec)
                                   (model-spec ckpt_name checkpoint) model-spec)
                 spec (or configured-spec
-                         (architecture/infer-unet-spec checkpoint architecture-info))
+                         (architecture/infer-unet-spec checkpoint architecture-info)
+                         (when resolved-diffusers-config
+                           (architecture/infer-diffusers-unet-spec
+                            checkpoint resolved-diffusers-config)))
                 conditioning-layers (architecture/infer-sdxl-conditioning-layers
                                      checkpoint architecture-info)
                 effective-spec
