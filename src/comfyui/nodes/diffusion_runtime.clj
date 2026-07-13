@@ -3,6 +3,7 @@
   contracts, every node in this pack performs real work: checkpoint catalog
   loading, latent allocation, or a DDIM transition."
   (:require [clojure.string :as str]
+            [comfyui.diffusion.model :as diffusion-model]
             [comfyui.diffusion.scheduler :as scheduler]
             [comfyui.safetensors :as safe]
             [num.array :as arr])
@@ -26,10 +27,13 @@
   Options:
   - `:backend` num backend used for latent allocation
   - `:resolve-checkpoint` maps ComfyUI's ckpt_name to a filesystem path
+  - `:model-spec` graph map, or `(fn [ckpt-name checkpoint] graph-map)`
+  - `:alphas-cumprod` schedule vector, or a resolver function
 
   The MODEL/CLIP/VAE maps share one lazy SafeTensorFile. The host owns its
   lifecycle and closes `:comfyui/checkpoint` when the workflow/model unloads."
-  [{:keys [backend resolve-checkpoint] :or {resolve-checkpoint identity}}]
+  [{:keys [backend resolve-checkpoint model-spec alphas-cumprod]
+    :or {resolve-checkpoint identity}}]
   [{:type "CheckpointLoaderSimple"
     :category "loaders"
     :inputs {:ckpt_name {:type "STRING"}}
@@ -37,9 +41,22 @@
               {:name "CLIP" :type "CLIP"}
               {:name "VAE" :type "VAE"}]
     :fn (fn [{:keys [ckpt_name]}]
-          (let [checkpoint (safe/open-file (resolve-checkpoint ckpt_name))]
-            [(component checkpoint :model
-                        ["model.diffusion_model." "diffusion_model." "unet."])
+          (let [checkpoint (safe/open-file (resolve-checkpoint ckpt_name))
+                model-component (component checkpoint :model
+                                           ["model.diffusion_model."
+                                            "diffusion_model." "unet."])
+                spec (if (fn? model-spec)
+                       (model-spec ckpt_name checkpoint) model-spec)
+                alphas (if (fn? alphas-cumprod)
+                         (alphas-cumprod ckpt_name checkpoint) alphas-cumprod)
+                executable-model
+                (cond-> model-component
+                  spec (assoc :comfyui/model-spec spec
+                              :comfyui/denoise
+                              (diffusion-model/compile-denoiser
+                               model-component backend spec))
+                  alphas (assoc :comfyui/alphas-cumprod (vec alphas)))]
+            [executable-model
              (component checkpoint :clip
                         ["cond_stage_model." "text_encoder." "clip."])
              (component checkpoint :vae

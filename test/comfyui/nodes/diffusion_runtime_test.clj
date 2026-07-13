@@ -33,6 +33,32 @@
     (Files/write path (.array buffer) (make-array OpenOption 0))
     path))
 
+(defn- f32-checkpoint [tensors]
+  (let [[entries payload-size]
+        (reduce (fn [[entries offset] [name {:keys [shape values]}]]
+                  (let [end (+ offset (* 4 (count values)))]
+                    [(assoc entries name
+                            {"dtype" "F32" "shape" shape
+                             "data_offsets" [offset end]})
+                     end]))
+                [{} 0] tensors)
+        header (.getBytes (json/write-str entries) "UTF-8")
+        buffer (doto (ByteBuffer/allocate (+ 8 (alength header) payload-size))
+                 (.order ByteOrder/LITTLE_ENDIAN))
+        path (Files/createTempFile "comfyui-unet-" ".safetensors"
+                                   (make-array FileAttribute 0))]
+    (.putLong buffer (long (alength header)))
+    (.put buffer header)
+    (doseq [[_ {:keys [values]}] tensors
+            value values]
+      (.putFloat buffer (float value)))
+    (Files/write path (.array buffer) (make-array OpenOption 0))
+    path))
+
+(defn- identity-values [n]
+  (mapv (fn [index] (if (= (quot index n) (mod index n)) 1.0 0.0))
+        (range (* n n))))
+
 (deftest executable-pack-loads-checkpoint-and-allocates-real-latent
   (let [path (checkpoint-fixture)
         registry (node/registry (runtime/pack {:backend backend
@@ -92,3 +118,76 @@
                        [:results "sample" 0])]
     (is (= [1 1 1 1] (:shape output)))
     (is (not= (arr/->vec sample) (arr/->vec output)))))
+
+(deftest checkpoint-backed-unet-graph-runs-through-ksampler
+  (let [prefix "model.diffusion_model."
+        tensors
+        [[(str prefix "input.weight")
+          {:shape [4 4 1 1] :values (identity-values 4)}]
+         [(str prefix "input.bias") {:shape [4] :values [0 0 0 0]}]
+         [(str prefix "down.weight")
+          {:shape [4 4 2 2]
+           :values (vec (for [oc (range 4) ic (range 4)
+                              _ki (range 2) _kj (range 2)]
+                          (if (= oc ic) 0.25 0.0)))}]
+         [(str prefix "down.bias") {:shape [4] :values [0 0 0 0]}]
+         [(str prefix "norm.weight") {:shape [4] :values [1 1 1 1]}]
+         [(str prefix "norm.bias") {:shape [4] :values [0 0 0 0]}]
+         [(str prefix "output.weight")
+          {:shape [4 8 1 1]
+           :values (vec (for [oc (range 4) ic (range 8)]
+                          (if (or (= ic oc) (= ic (+ 4 oc))) 0.5 0.0)))}]
+         [(str prefix "output.bias") {:shape [4] :values [0 0 0 0]}]]
+        path (f32-checkpoint tensors)
+        spec {:layers
+              [{:op :conv2d :weight (str prefix "input.weight")
+                :bias (str prefix "input.bias")}
+               {:op :save :name :encoder}
+               {:op :conv2d :weight (str prefix "down.weight")
+                :bias (str prefix "down.bias") :stride 2}
+               {:op :groupnorm :groups 2 :weight (str prefix "norm.weight")
+                :bias (str prefix "norm.bias")}
+               {:op :silu}
+               {:op :upsample :scale-factor 2}
+               {:op :cat-saved :name :encoder :axis 1}
+               {:op :conv2d :weight (str prefix "output.weight")
+                :bias (str prefix "output.bias")}
+               {:op :add-conditioning}
+               {:op :timestep-bias :scale 0.001}]}
+        registry (node/registry
+                  (runtime/pack {:backend backend
+                                 :resolve-checkpoint (constantly path)
+                                 :model-spec spec
+                                 :alphas-cumprod [0.95 0.8 0.6]}))
+        sample (arr/from-vec backend
+                             (mapv #(- (* 0.03 %) 0.4) (range 64))
+                             [1 4 4 4])
+        negative (arr/from-vec backend (repeat 64 -0.05) [1 4 4 4])
+        positive (arr/from-vec backend (repeat 64 0.1) [1 4 4 4])
+        workflow {"load" {:class_type "CheckpointLoaderSimple"
+                           :inputs {:ckpt_name "tiny-unet.safetensors"}}
+                  "sample" {:class_type "KSampler"
+                            :inputs {:model ["load" 0]
+                                     :positive positive :negative negative
+                                     :latent_image sample :seed 19 :steps 2 :cfg 3.0
+                                     :sampler_name "ddim" :scheduler "normal"
+                                     :denoise 1.0}}}]
+    (try
+      (let [result (exec/execute {:registry registry} workflow)
+            model (get-in result [:results "load" 0])
+            output (get-in result [:results "sample" 0])
+            denoise (:comfyui/denoise model)
+            unconditional (denoise sample 2 negative)
+            conditional (denoise sample 2 positive)
+            later-timestep (denoise sample 1 positive)
+            cache (:comfyui/tensor-cache (meta (:comfyui/denoise model)))]
+        (is (= ["load" "sample"] (:executed result)))
+        (is (= [1 4 4 4] (:shape output)))
+        (is (not= (arr/->vec sample) (arr/->vec output)))
+        (is (not= (arr/->vec unconditional) (arr/->vec conditional)))
+        (is (not= (arr/->vec conditional) (arr/->vec later-timestep)))
+        (is (= 8 (count @cache)))
+        (is (= spec (:comfyui/model-spec model)))
+        (safe/close! (:comfyui/checkpoint model)))
+      (finally
+        (Files/deleteIfExists path)))))

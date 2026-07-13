@@ -22,6 +22,7 @@ src/comfyui/
   viz.cljc             workflow → Mermaid
   nodes/langchain.cljc ChatModel / tool nodes bridging to langchain-clj
   safetensors.clj     lazy, validated F16/BF16/F32 checkpoint reader
+  diffusion/model.clj checkpoint-backed UNet graph lowering/execution
   diffusion/          real noise schedules and DDIM latent transitions
 ```
 
@@ -128,7 +129,7 @@ execution while retaining the upstream class names and wire types:
 - `DDIMStep` performs the real epsilon-prediction transition, including the
   deterministic path and eta/noise variance path, inside `comfyui.exec`.
 - `KSampler` selects descending training timesteps and repeatedly invokes an
-  injected model denoiser with positive/negative conditioning, applies
+  executable checkpoint model with positive/negative conditioning, applies
   classifier-free guidance, and advances the latent through DDIM. The current
   executable subset is `ddim` + `normal` + full denoise; unsupported sampler
   combinations fail explicitly instead of silently changing algorithms.
@@ -145,14 +146,20 @@ execution while retaining the upstream class names and wire types:
      :resolve-checkpoint #(str "/models/checkpoints/" %)})))
 ```
 
-The safetensors tests construct valid binary checkpoint payloads and prove
-window bounds plus F16/BF16/F32 decoding; runtime tests execute checkpoint
-loading, lazy tensor materialization, latent allocation, and DDIM through the
-actual graph executor. This is not yet a complete SD/SDXL render: CLIP
-tokenization/encoding, full trained UNet/DiT graph lowering, non-DDIM sampler
-families/schedulers, VAE decode, image codec/save, device-native NCHW kernels,
-and an installed real checkpoint for end-to-end image comparison remain
-required. Production image
+`comfyui.diffusion.model` lowers a plain-data model spec into checkpoint-backed
+num operations. Its current vocabulary executes convolution/downsampling,
+GroupNorm, SiLU, saved residual add/concat, nearest upsampling, direct
+conditioning, and timestep bias. Weights are decoded/uploaded lazily on first
+use and cached thereafter. The runtime test writes a valid safetensors checkpoint
+with eight trained-parameter tensors, loads it through `CheckpointLoaderSimple`,
+runs a U-shaped down/middle/up/skip denoiser under positive and negative CFG,
+and completes two DDIM steps through the actual graph executor.
+
+This is not yet a complete SD/SDXL render: upstream architecture detection,
+sinusoidal timestep embeddings, learned QKV cross-attention with CLIP
+tokenization/encoding, full production UNet/DiT lowering, non-DDIM sampler
+families, VAE decode, image codec/save, mixed precision, and an installed real
+checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 
 ## Tests / example
