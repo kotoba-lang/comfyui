@@ -80,6 +80,7 @@
                            :denoise-fn (:comfyui/denoise model)
                            :positive positive :negative negative :cfg 2.0
                            :final-alpha (first alphas)
+                           :retain-step-tensors? true
                            :on-step #(swap! fixed-events conj %)})
             fixed-latent (:sample fixed-sample)
             vae-decode (first (filter #(= "VAEDecode" (:type %)) definitions))

@@ -627,19 +627,30 @@
     (when (every? names required) layer)))
 
 (defn- diffusers-vae-attention [names prefix groups]
-  (let [layer {:op :vae-attention :groups groups
-               :norm-weight (str prefix "group_norm.weight")
-               :norm-bias (str prefix "group_norm.bias")
-               :query-weight (str prefix "to_q.weight")
-               :query-bias (str prefix "to_q.bias")
-               :key-weight (str prefix "to_k.weight")
-               :key-bias (str prefix "to_k.bias")
-               :value-weight (str prefix "to_v.weight")
-               :value-bias (str prefix "to_v.bias")
-               :output-weight (str prefix "to_out.0.weight")
-               :output-bias (str prefix "to_out.0.bias")}
-        required (vals (dissoc layer :op :groups))]
-    (when (every? names required) layer)))
+  (let [base {:op :vae-attention :groups groups
+              :norm-weight (str prefix "group_norm.weight")
+              :norm-bias (str prefix "group_norm.bias")}
+        modern (assoc base
+                      :query-weight (str prefix "to_q.weight")
+                      :query-bias (str prefix "to_q.bias")
+                      :key-weight (str prefix "to_k.weight")
+                      :key-bias (str prefix "to_k.bias")
+                      :value-weight (str prefix "to_v.weight")
+                      :value-bias (str prefix "to_v.bias")
+                      :output-weight (str prefix "to_out.0.weight")
+                      :output-bias (str prefix "to_out.0.bias"))
+        legacy (assoc base
+                      :query-weight (str prefix "query.weight")
+                      :query-bias (str prefix "query.bias")
+                      :key-weight (str prefix "key.weight")
+                      :key-bias (str prefix "key.bias")
+                      :value-weight (str prefix "value.weight")
+                      :value-bias (str prefix "value.bias")
+                      :output-weight (str prefix "proj_attn.weight")
+                      :output-bias (str prefix "proj_attn.bias"))
+        complete? #(every? names (vals (dissoc % :op :groups)))]
+    (cond (complete? modern) modern
+          (complete? legacy) legacy)))
 
 (defn infer-diffusers-vae-spec
   "Lower Diffusers AutoencoderKL encoder and decoder graphs from safetensors

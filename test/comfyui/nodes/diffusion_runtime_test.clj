@@ -17,6 +17,14 @@
 
 (def backend (cpu/cpu-backend))
 
+(deftest legacy-diffusers-scheduler-defaults-to-epsilon-prediction
+  (let [alphas-fn (ns-resolve 'comfyui.nodes.diffusion-runtime 'diffusers-alphas)
+        alphas (alphas-fn {"num_train_timesteps" 4
+                           "beta_start" 0.00085 "beta_end" 0.012
+                           "beta_schedule" "scaled_linear"})]
+    (is (= 4 (count alphas)))
+    (is (apply > alphas))))
+
 (deftest releasing-components-deduplicates-and-clears-weight-caches
   (let [weight (arr/from-vec backend [1.0 2.0] [2])
         cache (atom {"weight" weight})

@@ -295,6 +295,10 @@ batch item through the JVM PNG codec. The end-to-end runtime fixture executes
 32×32 PNG, and verifies its signature and output metadata.
 
 Diffusers `AutoencoderKL` files are inferred directly from their `config.json`.
+Both current attention tensor names (`to_q/to_k/to_v/to_out.0`) and legacy
+Diffusers 0.7 names (`query/key/value/proj_attn`) are recognized without
+renaming checkpoint files. Legacy scheduler configs that predate serialized
+`prediction_type` correctly default to their original epsilon prediction.
 The decoder executes post-quant projection, mid-block ResNets and spatial self-
 attention, every up block, final normalization, and RGB convolution. The encoder
 executes every down block/downsample, its own mid-block attention, quant projection,
@@ -338,6 +342,11 @@ The pipeline verifier additionally runs a fixed-noise, two-step `[501, 1]`
 DDIM trajectory through positive/negative CFG and the VAE. Against the same
 PyTorch/Diffusers trajectory, guided epsilon sums agree within `1e-4`, final
 latent and image sums within `1e-3`, and sampled output pixels within `1e-4`.
+It was rerun against the public `Narsil/tiny-stable-diffusion-torch` split
+safetensors pipeline after these compatibility changes: all 304 UNet, 84 CLIP,
+and 70 VAE tensors loaded, a real 852-byte PNG was emitted, CLIP max error was
+`6.07e-7`, two-step epsilon max error `1.03e-5`, latent-sum error `2.68e-6`,
+and image max/sum errors `1.19e-5` / `7.80e-5`.
 Full-denoise DDIM begins from the seeded noise tensor (`init_noise_sigma=1`),
 while Euler retains sigma-scaled initialization.
 

@@ -127,7 +127,9 @@
                 "linear" (scheduler/linear-betas steps start end)
                 (throw (ex-info "unsupported Diffusers beta schedule"
                                 {:config config})))]
-    (when-not (= "epsilon" (config-value config "prediction_type"))
+    ;; Diffusers schedulers before `prediction_type` was serialized used
+    ;; epsilon prediction unconditionally; absence therefore means epsilon.
+    (when-not (= "epsilon" (or (config-value config "prediction_type") "epsilon"))
       (throw (ex-info "only epsilon-prediction Diffusers pipelines are executable"
                       {:prediction-type (config-value config "prediction_type")})))
     (scheduler/alphas-cumprod betas)))

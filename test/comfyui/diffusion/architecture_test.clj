@@ -1,5 +1,6 @@
 (ns comfyui.diffusion.architecture-test
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.string :as str]
             [comfyui.diffusion.architecture :as architecture]
             [comfyui.diffusion.scheduler :as scheduler]))
 
@@ -305,7 +306,17 @@
                 "down_block_types" ["DownEncoderBlock2D" "DownEncoderBlock2D"]
                 "layers_per_block" 1 "norm_num_groups" 32
                 "latent_channels" 4 "out_channels" 3 "scaling_factor" 0.18215}
-        spec (architecture/infer-diffusers-vae-spec checkpoint* config)]
+        spec (architecture/infer-diffusers-vae-spec checkpoint* config)
+        legacy-name (fn [name]
+                      (-> name
+                          (str/replace ".to_q." ".query.")
+                          (str/replace ".to_k." ".key.")
+                          (str/replace ".to_v." ".value.")
+                          (str/replace ".to_out.0." ".proj_attn.")))
+        legacy-checkpoint
+        (update checkpoint* :tensors
+                #(into {} (map (fn [[name value]] [(legacy-name name) value]) %)))
+        legacy-spec (architecture/infer-diffusers-vae-spec legacy-checkpoint config)]
     (is (= :diffusers-autoencoder-kl (:architecture spec)))
     (is (= 0.18215 (:scaling-factor spec)))
     (is (= [:scale :conv2d :conv2d :resblock :vae-attention :resblock]
@@ -317,6 +328,12 @@
            (mapv :op (take 4 (:encoder-layers spec)))))
     (is (= [:conv2d :take-channels :scale]
            (mapv :op (take-last 3 (:encoder-layers spec)))))
+    (is (= "decoder.mid_block.attentions.0.query.weight"
+           (:query-weight (first (filter #(= :vae-attention (:op %))
+                                        (:layers legacy-spec))))))
+    (is (= "encoder.mid_block.attentions.0.proj_attn.weight"
+           (:output-weight (first (filter #(= :vae-attention (:op %))
+                                         (:encoder-layers legacy-spec))))))
     (is (nil? (:encoder-layers
                (architecture/infer-diffusers-vae-spec
                 (update checkpoint* :tensors dissoc "quant_conv.bias") config))))
