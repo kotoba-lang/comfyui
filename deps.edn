@@ -10,9 +10,8 @@
  :deps {org.clojure/data.json {:mvn/version "2.5.1"}
         io.github.kotoba-lang/langchain
         {:git/sha "c74e358c486bdbbed415261abe352ae73831bb8e"}
-        ;; Workspace development against the UNet tensor/autograd branch.
-        ;; Replace with its merged git SHA before publishing.
-        io.github.kotoba-lang/num {:local/root "../num"}}
+        io.github.kotoba-lang/num
+        {:git/sha "9eb57f0674c2e9f2b50367094810663f924f4d46"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
