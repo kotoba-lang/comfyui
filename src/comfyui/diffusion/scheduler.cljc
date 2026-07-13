@@ -41,19 +41,39 @@
         (recur (next remaining) product (conj out product)))
       out)))
 
-(defn- scalar [like value]
-  (arr/from-vec (:backend like) [(double value)] []))
+(defn- same-handle? [a b]
+  (and a b (identical? (:handle a) (:handle b))))
+
+(defn- release-except! [tensors protected]
+  (let [protected-handles (set (keep :handle protected))]
+    (arr/release-all!
+     (remove #(contains? protected-handles (:handle %)) (keep identity tensors)))))
+
+(defn- conditioning-tensors [conditioning]
+  (cond
+    (and (map? conditioning) (:handle conditioning)) [conditioning]
+    (map? conditioning) (keep #(when (and (map? %) (:handle %)) %)
+                              (vals conditioning))
+    :else []))
+
+(defn- audit-event [event retain-step-tensors?]
+  (if retain-step-tensors?
+    event
+    (dissoc event :epsilon :sample :predicted-original-sample)))
 
 (defn- scale [tensor value]
-  (t/mul tensor (scalar tensor value)))
+  (t/scale tensor value))
 
 (defn add-noise
   "Forward process `sqrt(alpha)*clean + sqrt(1-alpha)*noise`."
   [clean noise alpha-cumprod]
   (when-not (= (:shape clean) (:shape noise))
     (throw (ex-info "clean/noise shapes differ" {:clean (:shape clean) :noise (:shape noise)})))
-  (t/add (scale clean (Math/sqrt alpha-cumprod))
-         (scale noise (Math/sqrt (- 1.0 alpha-cumprod)))))
+  (let [clean-term (scale clean (Math/sqrt alpha-cumprod))
+        noise-term (scale noise (Math/sqrt (- 1.0 alpha-cumprod)))
+        output (t/add clean-term noise-term)]
+    (arr/release-all! [clean-term noise-term])
+    output))
 
 (defn ddim-step
   "One DDIM epsilon-prediction step. Returns both `:previous-sample` and
@@ -68,20 +88,27 @@
    (when-not (and (< 0 alpha 1.0) (< 0 alpha-prev) (<= alpha-prev 1.0) (<= 0 eta))
      (throw (ex-info "invalid DDIM coefficients"
                      {:alpha alpha :alpha-prev alpha-prev :eta eta})))
-   (let [predicted-x0 (scale (t/sub sample (scale epsilon (Math/sqrt (- 1.0 alpha))))
-                             (/ 1.0 (Math/sqrt alpha)))
+   (let [epsilon-term (scale epsilon (Math/sqrt (- 1.0 alpha)))
+         residual (t/sub sample epsilon-term)
+         predicted-x0 (scale residual (/ 1.0 (Math/sqrt alpha)))
          sigma (* eta
                   (Math/sqrt (* (/ (- 1.0 alpha-prev) (- 1.0 alpha))
                                 (- 1.0 (/ alpha alpha-prev)))))
          direction-scale (Math/sqrt (max 0.0 (- 1.0 alpha-prev (* sigma sigma))))
-         mean (t/add (scale predicted-x0 (Math/sqrt alpha-prev))
-                     (scale epsilon direction-scale))
+         x0-term (scale predicted-x0 (Math/sqrt alpha-prev))
+         direction-term (scale epsilon direction-scale)
+         mean (t/add x0-term direction-term)
          previous (if (pos? sigma)
                     (do
                       (when-not noise
                         (throw (ex-info "DDIM eta>0 requires noise" {:eta eta})))
-                      (t/add mean (scale noise sigma)))
+                      (let [noise-term (scale noise sigma)
+                            output (t/add mean noise-term)]
+                        (arr/release! noise-term)
+                        output))
                     mean)]
+     (arr/release-all! [epsilon-term residual x0-term direction-term])
+     (when-not (same-handle? mean previous) (arr/release! mean))
      {:previous-sample previous
       :predicted-original-sample predicted-x0
       :sigma sigma})))
@@ -93,7 +120,11 @@
     (throw (ex-info "CFG epsilon shapes differ"
                     {:unconditional (:shape unconditional)
                      :conditional (:shape conditional)})))
-  (t/add unconditional (scale (t/sub conditional unconditional) cfg)))
+  (let [difference (t/sub conditional unconditional)
+        guided-difference (scale difference cfg)
+        output (t/add unconditional guided-difference)]
+    (arr/release-all! [difference guided-difference])
+    output))
 
 (defn select-timesteps
   "Select Diffusers-compatible descending inference timesteps."
@@ -128,11 +159,11 @@
   indices into it. `noise-fn`, required only for eta>0, receives
   `(shape timestep)`. Returns the final latent and per-step audit history."
   [{:keys [sample alphas timesteps denoise-fn positive negative cfg eta noise-fn on-step
-           final-alpha]
-    :or {cfg 1.0 eta 0.0 final-alpha 1.0}}]
+           final-alpha retain-step-tensors?]
+    :or {cfg 1.0 eta 0.0 final-alpha 1.0 retain-step-tensors? false}}]
   (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn))
     (throw (ex-info "DDIM sampler requires sample, alphas, timesteps, and denoise-fn" {})))
-  (loop [current sample remaining (seq timesteps) history []]
+  (loop [current sample current-owned? false remaining (seq timesteps) history []]
     (if-let [timestep (first remaining)]
       (let [next-timestep (second remaining)
             alpha (double (nth alphas timestep))
@@ -149,9 +180,19 @@
             step (ddim-step current epsilon alpha alpha-prev {:eta eta :noise noise})
             event {:timestep timestep :alpha alpha :alpha-prev alpha-prev
                    :sigma (:sigma step) :epsilon epsilon
-                   :sample (:previous-sample step)}]
-        (when on-step (on-step event))
-        (recur (:previous-sample step) (next remaining) (conj history event)))
+                   :sample (:previous-sample step)}
+            audited (audit-event event retain-step-tensors?)
+            protected (concat [sample current (:previous-sample step)]
+                              (conditioning-tensors positive)
+                              (conditioning-tensors negative))]
+        (when on-step (on-step audited))
+        (release-except! [unconditional conditional noise] protected)
+        (when-not retain-step-tensors?
+          (release-except! [epsilon (:predicted-original-sample step)] protected)
+          (when current-owned?
+            (release-except! [current] [sample (:previous-sample step)])))
+        (recur (:previous-sample step) true (next remaining)
+               (conj history audited)))
       {:sample current :history history})))
 
 (defn alpha->sigma
@@ -214,11 +255,12 @@
   "Classifier-free-guided Euler discrete sampling for epsilon-prediction
   models. Model input is scaled by `1/sqrt(sigma^2+1)`; each step integrates
   the ODE derivative from the current training sigma to the next (final 0)."
-  [{:keys [sample alphas timesteps sigmas denoise-fn positive negative cfg on-step]
-    :or {cfg 1.0}}]
+  [{:keys [sample alphas timesteps sigmas denoise-fn positive negative cfg on-step
+           retain-step-tensors?]
+    :or {cfg 1.0 retain-step-tensors? false}}]
   (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn))
     (throw (ex-info "Euler sampler requires sample, alphas, timesteps, and denoise-fn" {})))
-  (loop [current sample remaining (seq timesteps)
+  (loop [current sample current-owned? false remaining (seq timesteps)
          sigma-remaining (seq (resolve-sigmas alphas timesteps sigmas)) history []]
     (if-let [timestep (first remaining)]
       (let [sigma (first sigma-remaining)
@@ -227,34 +269,46 @@
             unconditional (denoise-fn model-input timestep negative)
             conditional (denoise-fn model-input timestep positive)
             epsilon (classifier-free-guidance unconditional conditional cfg)
-            predicted-x0 (t/sub current (scale epsilon sigma))
+            epsilon-at-sigma (scale epsilon sigma)
+            predicted-x0 (t/sub current epsilon-at-sigma)
             dt (- sigma-next sigma)
-            next-sample (t/add current (scale epsilon dt))
+            derivative-step (scale epsilon dt)
+            next-sample (t/add current derivative-step)
             event {:timestep timestep :sigma sigma :sigma-next sigma-next
-                   :predicted-original-sample predicted-x0}]
-        (when on-step (on-step event))
-        (recur next-sample (next remaining) (next sigma-remaining)
-               (conj history event)))
+                   :predicted-original-sample predicted-x0}
+            audited (audit-event event retain-step-tensors?)
+            protected (concat [sample current next-sample]
+                              (conditioning-tensors positive)
+                              (conditioning-tensors negative))]
+        (when on-step (on-step audited))
+        (release-except! [model-input unconditional conditional
+                          epsilon-at-sigma derivative-step] protected)
+        (when-not retain-step-tensors?
+          (release-except! [epsilon predicted-x0] protected)
+          (when current-owned? (release-except! [current] [sample next-sample])))
+        (recur next-sample true (next remaining) (next sigma-remaining)
+               (conj history audited)))
       {:sample current :history history})))
 
 (defn euler-ancestral-sample
   "Euler ancestral sampling. Each transition decomposes target sigma into a
   deterministic `sigma-down` step plus fresh noise at `sigma-up`; `eta=1`
   matches the standard ancestral schedule."
-  [{:keys [sample alphas timesteps sigmas denoise-fn positive negative cfg eta noise-fn on-step]
-    :or {cfg 1.0 eta 1.0}}]
+  [{:keys [sample alphas timesteps sigmas denoise-fn positive negative cfg eta noise-fn on-step
+           retain-step-tensors?]
+    :or {cfg 1.0 eta 1.0 retain-step-tensors? false}}]
   (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn)
                  (<= 0.0 eta))
     (throw (ex-info "Euler ancestral sampler received invalid arguments" {:eta eta})))
-  (loop [current sample remaining (seq timesteps)
+  (loop [current sample current-owned? false remaining (seq timesteps)
          sigma-remaining (seq (resolve-sigmas alphas timesteps sigmas)) history []]
     (if-let [timestep (first remaining)]
       (let [sigma (first sigma-remaining)
             sigma-next (second sigma-remaining)
             model-input (scale current (/ 1.0 (Math/sqrt (+ 1.0 (* sigma sigma)))))
-            epsilon (classifier-free-guidance
-                     (denoise-fn model-input timestep negative)
-                     (denoise-fn model-input timestep positive) cfg)
+            unconditional (denoise-fn model-input timestep negative)
+            conditional (denoise-fn model-input timestep positive)
+            epsilon (classifier-free-guidance unconditional conditional cfg)
             sigma-up (if (zero? sigma-next)
                        0.0
                        (min sigma-next
@@ -267,17 +321,29 @@
                                         (* sigma sigma)))))))
             sigma-down (Math/sqrt (max 0.0 (- (* sigma-next sigma-next)
                                                 (* sigma-up sigma-up))))
-            mean (t/add current (scale epsilon (- sigma-down sigma)))
+            derivative-step (scale epsilon (- sigma-down sigma))
+            mean (t/add current derivative-step)
             noise (when (pos? sigma-up)
                     (when-not noise-fn
                       (throw (ex-info "Euler ancestral sampling requires noise-fn" {})))
                     (noise-fn (:shape current) timestep))
-            next-sample (if noise (t/add mean (scale noise sigma-up)) mean)
+            noise-step (when noise (scale noise sigma-up))
+            next-sample (if noise-step (t/add mean noise-step) mean)
             event {:timestep timestep :sigma sigma :sigma-next sigma-next
-                   :sigma-up sigma-up :sigma-down sigma-down}]
-        (when on-step (on-step event))
-        (recur next-sample (next remaining) (next sigma-remaining)
-               (conj history event)))
+                   :sigma-up sigma-up :sigma-down sigma-down}
+            audited (audit-event event retain-step-tensors?)
+            protected (concat [sample current next-sample]
+                              (conditioning-tensors positive)
+                              (conditioning-tensors negative))]
+        (when on-step (on-step audited))
+        (release-except! [model-input unconditional conditional derivative-step
+                          noise noise-step] protected)
+        (when-not (same-handle? mean next-sample) (arr/release! mean))
+        (when-not retain-step-tensors?
+          (release-except! [epsilon] protected)
+          (when current-owned? (release-except! [current] [sample next-sample])))
+        (recur next-sample true (next remaining) (next sigma-remaining)
+               (conj history audited)))
       {:sample current :history history})))
 
 (defn dpmpp-2m-sample
@@ -287,44 +353,65 @@
   estimate `x0 = x - sigma*epsilon`. Non-final steps use the exponential
   first-order update, upgraded from the second step onward by the previous
   denoised estimate. The terminal sigma-zero step returns x0 exactly."
-  [{:keys [sample alphas timesteps sigmas denoise-fn positive negative cfg on-step]
-    :or {cfg 1.0}}]
+  [{:keys [sample alphas timesteps sigmas denoise-fn positive negative cfg on-step
+           retain-step-tensors?]
+    :or {cfg 1.0 retain-step-tensors? false}}]
   (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn))
     (throw (ex-info "DPM++ 2M sampler requires sample, alphas, timesteps, and denoise-fn"
                     {})))
-  (loop [current sample remaining (seq timesteps)
+  (loop [current sample current-owned? false remaining (seq timesteps)
          sigma-remaining (seq (resolve-sigmas alphas timesteps sigmas))
          old-denoised nil previous-time nil history []]
     (if-let [timestep (first remaining)]
       (let [sigma (first sigma-remaining)
             sigma-next (second sigma-remaining)
             model-input (scale current (/ 1.0 (Math/sqrt (+ 1.0 (* sigma sigma)))))
-            epsilon (classifier-free-guidance
-                     (denoise-fn model-input timestep negative)
-                     (denoise-fn model-input timestep positive) cfg)
-            denoised (t/sub current (scale epsilon sigma))
+            unconditional (denoise-fn model-input timestep negative)
+            conditional (denoise-fn model-input timestep positive)
+            epsilon (classifier-free-guidance unconditional conditional cfg)
+            epsilon-at-sigma (scale epsilon sigma)
+            denoised (t/sub current epsilon-at-sigma)
             time (- (Math/log sigma))
-            next-sample
+            update
             (if (zero? sigma-next)
-              denoised
+              {:sample denoised :temporaries []}
               (let [next-time (- (Math/log sigma-next))
                     h (- next-time time)
-                    effective-denoised
+                    effective
                     (if old-denoised
                       (let [h-last (- time previous-time)
                             r (/ h-last h)
-                            previous-factor (/ 1.0 (* 2.0 r))]
-                        (t/sub (scale denoised (+ 1.0 previous-factor))
-                               (scale old-denoised previous-factor)))
-                      denoised)
+                            previous-factor (/ 1.0 (* 2.0 r))
+                            current-term (scale denoised (+ 1.0 previous-factor))
+                            previous-term (scale old-denoised previous-factor)
+                            value (t/sub current-term previous-term)]
+                        {:value value :temporaries [current-term previous-term]})
+                      {:value denoised :temporaries []})
                     ratio (/ sigma-next sigma)
-                    denoised-factor (- (Math/expm1 (- h)))]
-                (t/add (scale current ratio)
-                       (scale effective-denoised denoised-factor))))
+                    denoised-factor (- (Math/expm1 (- h)))
+                    current-term (scale current ratio)
+                    denoised-term (scale (:value effective) denoised-factor)
+                    value (t/add current-term denoised-term)]
+                {:sample value
+                 :temporaries (concat (:temporaries effective)
+                                      [current-term denoised-term]
+                                      (when-not (same-handle? (:value effective) denoised)
+                                        [(:value effective)]))}))
+            next-sample (:sample update)
             event {:timestep timestep :sigma sigma :sigma-next sigma-next
                    :order (if (and old-denoised (pos? sigma-next)) 2 1)
-                   :predicted-original-sample denoised :sample next-sample}]
-        (when on-step (on-step event))
-        (recur next-sample (next remaining) (next sigma-remaining) denoised time
-               (conj history event)))
+                   :predicted-original-sample denoised :sample next-sample}
+            audited (audit-event event retain-step-tensors?)
+            protected (concat [sample current next-sample denoised]
+                              (conditioning-tensors positive)
+                              (conditioning-tensors negative))]
+        (when on-step (on-step audited))
+        (release-except! (concat [model-input unconditional conditional
+                                  epsilon-at-sigma]
+                                 (:temporaries update)) protected)
+        (when-not retain-step-tensors?
+          (release-except! [epsilon old-denoised] protected)
+          (when current-owned? (release-except! [current] [sample next-sample denoised])))
+        (recur next-sample true (next remaining) (next sigma-remaining) denoised time
+               (conj history audited)))
       {:sample current :history history})))

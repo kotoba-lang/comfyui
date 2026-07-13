@@ -150,6 +150,14 @@ execution while retaining the upstream class names and wire types:
   slicing. DDIM noises an existing latent in alpha space for partial denoise;
   sigma samplers use `latent + sigma*noise`. Unsupported sampler
   combinations fail explicitly instead of silently changing algorithms.
+  Scheduler scalar multiplication stays device-native and every CFG,
+  derivative, noise, x0, and superseded sample temporary is released after its
+  final dispatch. Step history is metadata-only by default so 20–50 steps do
+  not retain full latent tensors; diagnostics can opt into the intentionally
+  owning `:retain-step-tensors? true` mode. A live Apple Metal verifier runs all
+  four samplers for three steps, checks CPU parity, releases caller-owned
+  inputs/output, and requires live GPU buffer count and bytes to return exactly
+  to their pre-sampler baseline.
 - `VAEEncode` normalizes NHWC RGB `[0,1]` into NCHW `[-1,1]`, executes the
   checkpoint encoder, selects the diagonal-Gaussian posterior mean, and applies
   the model scaling factor. Its output connects directly to partial-denoise

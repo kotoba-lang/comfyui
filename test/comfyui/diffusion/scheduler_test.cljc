@@ -88,6 +88,8 @@
     (is (approx? 1.0 sigma2))
     (is (= [2 1] (mapv :timestep @events)))
     (is (zero? (:sigma-next (last @events))))
+    (is (every? #(not (contains? % :predicted-original-sample))
+                (:history result)))
     (is (approx? expected (first (arr/->vec (:sample result)))))))
 
 (deftest euler-ancestral-splits-deterministic-and-noise-sigmas
@@ -115,6 +117,7 @@
                  :alphas [0.92 0.8 0.6 0.4] :timesteps [3 2 1]
                  :negative (arr/from-vec backend [0.1] [1])
                  :positive (arr/from-vec backend [0.3] [1]) :cfg 2.0
+                 :retain-step-tensors? true
                  :denoise-fn (fn [_ _ conditioning] conditioning)
                  :on-step #(swap! events conj %)})]
     ;; Independently evaluated from k-diffusion's exponential 2M recurrence.
@@ -123,6 +126,7 @@
     (is (= [1 2 1] (mapv :order @events)))
     (is (= [3 2 1] (mapv :timestep @events)))
     (is (zero? (:sigma-next (last @events))))
+    (is (contains? (last (:history result)) :predicted-original-sample))
     (is (approx? (first (arr/->vec (:predicted-original-sample
                                     (last @events))))
                  (first (arr/->vec (:sample result)))))))

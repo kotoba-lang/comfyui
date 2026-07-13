@@ -2,6 +2,7 @@
   "Prove the ComfyUI VAE graph's asymmetric pad, posterior channel slice, and
   latent scale stay device-native on Deno WebGPU backed by Apple Metal."
   (:require [comfyui.diffusion.model :as model]
+            [comfyui.diffusion.scheduler :as scheduler]
             [num.array :as arr]
             [num.cpu :as cpu]
             [num.deno-gpu :as dg]
@@ -134,6 +135,26 @@
    (arr/from-vec backend (mapv #(* 0.1 (inc %)) (range 12)) [2 1 2 3])
    (arr/from-vec backend (mapv #(- (* 0.05 %) 0.2) (range 12)) [1 2 3 2])))
 
+(def sampler-names [:ddim :euler :euler-ancestral :dpmpp-2m])
+
+(defn- sampler-run [backend sampler-name]
+  (let [sample (arr/from-vec backend [0.2 -0.1 0.4 -0.3] [1 4])
+        negative (arr/from-vec backend [0.05 -0.02 0.01 -0.03] [1 4])
+        positive (arr/from-vec backend [0.1 0.04 -0.02 0.03] [1 4])
+        args {:sample sample :alphas [0.92 0.8 0.6 0.4]
+              :timesteps [3 2 1] :negative negative :positive positive
+              :cfg 2.0 :denoise-fn (fn [_ _ conditioning] conditioning)
+              :noise-fn (fn [shape _]
+                          (arr/from-vec backend (repeat (arr/nelems shape) 0.125)
+                                        shape))}
+        result ((case sampler-name
+                  :ddim scheduler/ddim-sample
+                  :euler scheduler/euler-sample
+                  :euler-ancestral scheduler/euler-ancestral-sample
+                  :dpmpp-2m scheduler/dpmpp-2m-sample)
+                args)]
+    {:output (:sample result) :owned [sample negative positive]}))
+
 (defn -main [& _]
   (let [cpu-backend (cpu/cpu-backend)
         expected-output (compile-and-run cpu-backend)
@@ -145,13 +166,28 @@
         expected-transformer (arr/->vec (spatial-transformer cpu-backend))
         expected-batched (arr/->vec (broadcast-batched-matmul cpu-backend))
         expected-vae-attention (arr/->vec (vae-attention cpu-backend))
-        expected-cross-attention (arr/->vec (legacy-cross-attention cpu-backend))]
+        expected-cross-attention (arr/->vec (legacy-cross-attention cpu-backend))
+        expected-sampler-runs (mapv #(sampler-run cpu-backend %) sampler-names)
+        expected-samplers (mapv #(arr/->vec (:output %)) expected-sampler-runs)]
     (-> (dg/request-device)
         (.then
          (fn [request]
            (let [gpu (dg/backend request)
                  output (compile-and-run gpu)
-                 [gpu-nchw gpu-image] (image-conversions gpu)]
+                 [gpu-nchw gpu-image] (image-conversions gpu)
+                 sampler-baseline (dg/backend-stats gpu)
+                 gpu-sampler-runs (mapv #(sampler-run gpu %) sampler-names)
+                 sampler-promise
+                 (js/Promise.all
+                  (into-array (map #(arr/->vec (:output %)) gpu-sampler-runs)))]
+             (doseq [run gpu-sampler-runs]
+               (arr/release-all! (conj (:owned run) (:output run))))
+             (let [sampler-after (dg/backend-stats gpu)
+                   sampler-lifetime-ok?
+                   (and (= (:live-buffers sampler-baseline)
+                           (:live-buffers sampler-after))
+                        (= (:live-bytes sampler-baseline)
+                           (:live-bytes sampler-after)))]
              (.then
               (js/Promise.all
                #js [(arr/->vec output) (arr/->vec (denoise gpu))
@@ -159,7 +195,8 @@
                     (arr/->vec (spatial-transformer gpu))
                     (arr/->vec (broadcast-batched-matmul gpu))
                     (arr/->vec (vae-attention gpu))
-                    (arr/->vec (legacy-cross-attention gpu))])
+                    (arr/->vec (legacy-cross-attention gpu))
+                    sampler-promise])
               (fn [results]
                 (let [actual (aget results 0)
                       actual-denoise (aget results 1)
@@ -169,6 +206,7 @@
                       actual-batched (aget results 5)
                       actual-vae-attention (aget results 6)
                       actual-cross-attention (aget results 7)
+                      actual-samplers (vec (js/Array.from (aget results 8)))
                       close? (fn [expected actual]
                                (and (= (count expected) (count actual))
                                     (every? true?
@@ -185,7 +223,9 @@
                            (close? expected-transformer actual-transformer)
                            (close? expected-batched actual-batched)
                            (close? expected-vae-attention actual-vae-attention)
-                           (close? expected-cross-attention actual-cross-attention))
+                           (close? expected-cross-attention actual-cross-attention)
+                           (every? true? (map close? expected-samplers actual-samplers))
+                           sampler-lifetime-ok?)
                     (throw
                      (ex-info "Metal liveness graphs differ from CPU"
                               {:shape (:shape output)
@@ -203,10 +243,14 @@
                                :expected-vae-attention expected-vae-attention
                                :actual-vae-attention actual-vae-attention
                                :expected-cross-attention expected-cross-attention
-                               :actual-cross-attention actual-cross-attention})))
-                  (println "OK VAE attention + image-boundary + SpatialTransformer graphs match CPU with"
+                               :actual-cross-attention actual-cross-attention
+                               :expected-samplers expected-samplers
+                               :actual-samplers actual-samplers
+                               :sampler-baseline sampler-baseline
+                               :sampler-after sampler-after})))
+                  (println "OK VAE + SpatialTransformer + four sampler graphs match CPU and release to baseline with"
                            "GPUBuffer.destroy on"
-                           (dg/adapter-description request))))))))
+                           (dg/adapter-description request)))))))))
         (.catch
          (fn [error]
            (println "ERROR:" (or (.-stack error) (str error)))
