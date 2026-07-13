@@ -443,6 +443,14 @@ deno run --allow-all target/deno-img2img-nodes-verify.cjs
 # GPU baseline restored: passed
 ```
 
+`SaveImage` no longer restricts the Deno host to batch size one or overwrites
+`prefix_00000.png` on every execution. JVM and Deno reserve one contiguous,
+process-safe counter range per output directory/prefix, account for files already
+on disk, encode every NHWC batch row, and return one ComfyUI UI metadata entry per
+artifact. Repeated two-image saves produce `00000` through `00003`; the Metal
+verifier parses all four PNG dimensions and confirms the downloaded batch tensor
+is released.
+
 The txt2img graph remains:
 
 ```text

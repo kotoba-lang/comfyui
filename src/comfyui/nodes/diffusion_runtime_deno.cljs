@@ -30,6 +30,64 @@
   (let [value (str/replace (or value "ComfyUI") #"[^A-Za-z0-9._-]" "_")]
     (if (seq value) value "ComfyUI")))
 
+(defonce ^:private output-counters (atom {}))
+
+(defn- existing-next-counter [directory prefix]
+  (if-not (try (.-isDirectory (js/Deno.statSync directory))
+               (catch :default _ false))
+    0
+    (inc (reduce
+          max -1
+          (keep (fn [entry]
+                  (let [name (.-name entry)
+                        start (str prefix "_")]
+                    (when (and (.-isFile entry) (str/starts-with? name start)
+                               (str/ends-with? name ".png"))
+                      (let [number (subs name (count start) (- (count name) 4))]
+                        (when (re-matches #"[0-9]{5}" number)
+                          (js/parseInt number 10))))))
+                (js/Array.from (js/Deno.readDirSync directory)))))))
+
+(defn- reserve-counters! [directory prefix count]
+  (let [key [directory prefix]
+        existing (existing-next-counter directory prefix)
+        result (swap! output-counters
+                      (fn [state]
+                        (let [start (max existing (get state key 0))]
+                          (assoc state key (+ start count)))))]
+    (- (get result key) count)))
+
+(defn- save-png-batch! [images output-directory filename-prefix]
+  (let [[batch height width channels :as shape] (:shape images)]
+    (when-not (and (= 4 (count shape)) (pos-int? batch) (= 3 channels))
+      (throw (ex-info "Deno SaveImage requires batched NHWC RGB images"
+                      {:shape shape})))
+    (when-not (seq output-directory)
+      (throw (ex-info "Deno SaveImage requires output-directory" {})))
+    (js/Deno.mkdirSync output-directory #js {:recursive true})
+    (let [prefix (safe-prefix filename-prefix)
+          start (reserve-counters! output-directory prefix batch)
+          image-size (* height width channels)]
+      (-> (arr/->vec images)
+          (.then
+           (fn [values]
+             (js/Promise.all
+              (into-array
+               (mapv
+                (fn [batch-index]
+                  (let [counter (+ start batch-index)
+                        filename (str prefix "_" (.padStart (str counter) 5 "0") ".png")
+                        path (str output-directory "/" filename)
+                        pixels (subvec (vec values) (* batch-index image-size)
+                                       (* (inc batch-index) image-size))]
+                    (-> (png/encode-rgb pixels width height)
+                        (.then (fn [bytes]
+                                 (js/Deno.writeFileSync path bytes)
+                                 {:filename filename :subfolder "" :type "output"
+                                  :path path :bytes (.-byteLength bytes)})))))
+                (range batch))))))
+          (.then #(vector {:images (vec (js->clj % :keywordize-keys true))}))))))
+
 (defn- load-png [backend input-directory filename]
   (when-not (and (seq input-directory) (string? filename) (not (str/blank? filename)))
     (throw (ex-info "Deno LoadImage requires input-directory and filename" {})))
@@ -223,19 +281,4 @@
              :filename_prefix {:type "STRING" :default "ComfyUI"}}
     :outputs [{:name "UI" :type "UI"}]
     :fn (fn [{:keys [images filename_prefix]}]
-          (when-not (seq output-directory)
-            (throw (ex-info "Deno SaveImage requires output-directory" {})))
-          (let [[batch height width channels] (:shape images)]
-            (when-not (= [1 height width 3] [batch height width channels])
-              (throw (ex-info "Deno SaveImage currently requires one NHWC RGB image"
-                              {:shape (:shape images)})))
-            (-> (arr/->vec images)
-                (.then #(png/encode-rgb % width height))
-                (.then (fn [bytes]
-                         (js/Deno.mkdirSync output-directory #js {:recursive true})
-                         (let [filename (str (safe-prefix filename_prefix) "_00000.png")
-                               path (str output-directory "/" filename)]
-                           (js/Deno.writeFileSync path bytes)
-                           [{:images [{:filename filename :subfolder ""
-                                      :type "output" :path path
-                                      :bytes (.-byteLength bytes)}]}]))))))}])
+          (save-png-batch! images output-directory filename_prefix))}])

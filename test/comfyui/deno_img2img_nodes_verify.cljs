@@ -56,7 +56,44 @@
                (when-not ok?
                  (throw (ex-info "Deno img2img nodes failed"
                                  {:image actual-image :mask actual-mask
-                                  :latent actual-latent :stats stats}))))))))))
+                                 :latent actual-latent :stats stats}))))))))))
+
+(defn- run-batch-save [request backend directory]
+  (doseq [entry (js/Array.from (js/Deno.readDirSync directory))
+          :when (and (.-isFile entry) (.startsWith (.-name entry) "batch_"))]
+    (js/Deno.removeSync (str directory "/" (.-name entry))))
+  (let [baseline (dg/backend-stats backend)
+        images (arr/from-vec backend
+                             [1.0 0.0 0.0, 0.0 1.0 0.0,
+                              0.0 0.0 1.0, 1.0 1.0 1.0]
+                             [2 1 2 3])
+        save-node (first (filter #(= "SaveImage" (:type %))
+                                 (runtime/pack {:backend backend
+                                                :output-directory directory})))
+        save! #((:fn save-node) {:images images :filename_prefix "batch"})]
+    (-> (save!)
+        (.then (fn [first-result]
+                 (-> (save!) (.then #(vector first-result %)))))
+        (.then
+         (fn [[first-result second-result]]
+           (let [rows (concat (:images (first first-result))
+                              (:images (first second-result)))
+                 names (mapv :filename rows)
+                 dimensions (mapv #(png/dimensions
+                                    (js/Deno.readFileSync (:path %))) rows)]
+             (arr/release! images)
+             (let [stats (dg/backend-stats backend)
+                   ok? (and (= ["batch_00000.png" "batch_00001.png"
+                                "batch_00002.png" "batch_00003.png"] names)
+                            (= [[2 1] [2 1] [2 1] [2 1]] dimensions)
+                            (= (:live-buffers baseline) (:live-buffers stats))
+                            (= (:live-bytes baseline) (:live-bytes stats)))]
+               (println "Deno batch SaveImage counter reservation on"
+                        (dg/adapter-description request) (if ok? "passed" "failed"))
+               (when-not ok?
+                 (throw (ex-info "Deno batch SaveImage failed"
+                                 {:names names :dimensions dimensions
+                                  :stats stats}))))))))))
 
 (defn- run-metal [directory filename expected quantized request]
   (let [backend (dg/backend request)
@@ -68,7 +105,8 @@
                   "encode" {:class_type "VAEEncode"
                             :inputs {:pixels ["load" 0] :vae vae}}}]
     (-> (exec/execute-async {:registry registry :cache nil} workflow)
-        (.then #(verify-execution request backend baseline expected quantized %)))))
+        (.then #(verify-execution request backend baseline expected quantized %))
+        (.then (fn [_] (run-batch-save request backend directory))))))
 
 (defn- rejects? [f]
   (try

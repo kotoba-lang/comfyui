@@ -16,6 +16,33 @@
            [java.util Random]
            [javax.imageio ImageIO]))
 
+(defonce ^:private output-counters (atom {}))
+
+(defn- existing-next-counter [directory prefix]
+  (let [start (str prefix "_")]
+    (inc (reduce
+          max -1
+          (keep (fn [^java.io.File file]
+                  (let [name (.getName file)]
+                    (when (and (.isFile file) (str/starts-with? name start)
+                               (str/ends-with? name ".png"))
+                      (let [number (subs name (count start) (- (count name) 4))]
+                        (when (re-matches #"[0-9]{5}" number)
+                          (Long/parseLong number))))))
+                (or (.listFiles (.toFile directory))
+                    (make-array java.io.File 0)))))))
+
+(defn- reserve-counters! [directory prefix count]
+  (let [key [(str directory) prefix]
+        existing (existing-next-counter directory prefix)]
+    (loop []
+      (let [old @output-counters
+            start (max existing (get old key 0))
+            next (assoc old key (+ start count))]
+        (if (compare-and-set! output-counters old next)
+          start
+          (recur))))))
+
 (defn- save-png-batch [images output-directory filename-prefix]
   (let [[batch height width channels :as shape] (:shape images)]
     (when-not (and (= 4 (count shape)) (= 3 channels))
@@ -26,10 +53,11 @@
           prefix (str/replace (or filename-prefix "ComfyUI") #"[^A-Za-z0-9._-]" "_")
           values (double-array (arr/->vec images))]
       (Files/createDirectories directory (make-array java.nio.file.attribute.FileAttribute 0))
-      (mapv
-       (fn [batch-index]
+      (let [start (reserve-counters! directory prefix batch)]
+        (mapv
+         (fn [batch-index]
          (let [image (BufferedImage. width height BufferedImage/TYPE_INT_RGB)
-               filename (format "%s_%05d.png" prefix batch-index)
+               filename (format "%s_%05d.png" prefix (+ start batch-index))
                path (.resolve directory filename)]
            (dotimes [y height]
              (dotimes [x width]
@@ -46,7 +74,7 @@
            (when-not (ImageIO/write image "png" (.toFile path))
              (throw (ex-info "no PNG ImageIO writer available" {})))
            {:filename filename :subfolder "" :type "output" :path (str path)}))
-       (range batch)))))
+         (range batch))))))
 
 (defn- load-image [backend input-directory filename]
   (when-not (and backend input-directory (string? filename) (not (str/blank? filename)))
