@@ -61,12 +61,35 @@
                  (aget position (+ (* index hidden) channel)))))
        [1 length hidden]))))
 
+(defn- slice-first-axis [tensor start length]
+  (let [[rows columns] (:shape tensor)]
+    (when (> (+ start length) rows)
+      (fail "projection slice exceeds tensor" {:shape (:shape tensor)
+                                                :start start :length length}))
+    (arr/from-vec (:backend tensor)
+                  (subvec (vec (arr/->vec tensor)) (* start columns)
+                          (* (+ start length) columns))
+                  [length columns])))
+
+(defn- slice-vector [tensor start length]
+  (arr/from-vec (:backend tensor)
+                (subvec (vec (arr/->vec tensor)) start (+ start length))
+                [length]))
+
 (defn- self-attention [x tensor! layer heads]
   (let [[batch length hidden] (:shape x)
         head-dim (quot hidden heads)
+        fused? (:in-proj-weight layer)
+        fused-weight (when fused? (tensor! (:in-proj-weight layer)))
+        fused-bias (when fused? (tensor! (:in-proj-bias layer)))
+        projection-index {"query" 0 "key" 1 "value" 2}
         project (fn [name]
-                  (linear x (tensor! (get layer (keyword (str name "-weight"))))
-                          (tensor! (get layer (keyword (str name "-bias"))))))
+                  (if fused?
+                    (let [offset (* hidden (projection-index name))]
+                      (linear x (slice-first-axis fused-weight offset hidden)
+                              (slice-vector fused-bias offset hidden)))
+                    (linear x (tensor! (get layer (keyword (str name "-weight"))))
+                            (tensor! (get layer (keyword (str name "-bias")))))))
         split (fn [value]
                 (t/transpose (t/reshape value [batch length heads head-dim])
                              [0 2 1 3]))
@@ -90,7 +113,8 @@
   "Compile a CLIP transformer spec. Returns a function accepting a tokenizer
   result map and producing it with `:tensor [1,seq,hidden]` and `:pooled`."
   [component backend {:keys [token-embedding position-embedding layers
-                             final-norm-weight final-norm-bias heads eps]
+                             final-norm-weight final-norm-bias heads eps
+                             return-penultimate? text-projection]
                       :or {eps 1.0e-5} :as spec}]
   (when-not (and backend (fn? (:comfyui/read-tensor component))
                  (seq layers) (pos-int? heads))
@@ -104,9 +128,8 @@
       (fn [{:keys [input-ids] :as tokenized}]
         (let [initial (embeddings backend input-ids
                                   (tensor! token-embedding) (tensor! position-embedding))
-              hidden
-              (reduce
-               (fn [x layer]
+              block
+              (fn [x layer]
                  (let [normalized (layer-norm x (tensor! (:norm1-weight layer))
                                               (tensor! (:norm1-bias layer)) eps)
                        attention (self-attention normalized tensor! layer heads)
@@ -121,7 +144,10 @@
                                    (tensor! (:fc2-weight layer))
                                    (tensor! (:fc2-bias layer)))]
                    (nm/add residual mlp)))
-               initial layers)
+              states (vec (reductions block initial layers))
+              hidden (if return-penultimate?
+                       (nth states (dec (count layers)))
+                       (peek states))
               output (layer-norm hidden (tensor! final-norm-weight)
                                  (tensor! final-norm-bias) eps)
               [_ length hidden-size] (:shape output)
@@ -131,10 +157,13 @@
                                                 (:attention-mask tokenized)))
                                         length)))
               values (vec (arr/->vec output))
-              pooled (arr/from-vec backend
-                                     (subvec values (* eos-index hidden-size)
-                                             (* (inc eos-index) hidden-size))
-                                     [1 hidden-size])]
+              pooled-base (arr/from-vec backend
+                                          (subvec values (* eos-index hidden-size)
+                                                  (* (inc eos-index) hidden-size))
+                                          [1 hidden-size])
+              pooled (if text-projection
+                       (t/matmul pooled-base (tensor! text-projection))
+                       pooled-base)]
           (assoc tokenized :tensor output :pooled pooled)))
       {:comfyui/clip-spec spec :comfyui/tensor-cache cache})))
 

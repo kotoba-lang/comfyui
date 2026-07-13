@@ -111,9 +111,50 @@
       (when (and root contiguous? (seq layers) (pos-int? heads)
                  (every? names required))
         {:token-embedding token-name :position-embedding position-name
-         :layers layers :heads heads
+         :layers layers :heads heads :hidden hidden :format :hf
          :final-norm-weight final-weight :final-norm-bias final-bias
          :eps 1.0e-5})))
+
+(defn- infer-openclip-spec [checkpoint names root]
+  (let [token-name (str root "token_embedding.weight")
+        position-name (str root "positional_embedding")
+        layer-pattern (re-pattern
+                       (str "^" (Pattern/quote root)
+                            "transformer\\.resblocks\\.(\\d+)\\.ln_1\\.weight$"))
+        indices (->> names
+                     (keep #(some->> (re-matches layer-pattern %)
+                                     second Long/parseLong))
+                     sort vec)
+        contiguous? (= indices (vec (range (count indices))))
+        hidden (second (shape-at checkpoint token-name))
+        heads (when (and hidden (zero? (mod (long hidden) 64)))
+                (quot (long hidden) 64))
+        layer-spec
+        (fn [index]
+          (let [base (str root "transformer.resblocks." index ".")]
+            {:norm1-weight (str base "ln_1.weight")
+             :norm1-bias (str base "ln_1.bias")
+             :in-proj-weight (str base "attn.in_proj_weight")
+             :in-proj-bias (str base "attn.in_proj_bias")
+             :output-weight (str base "attn.out_proj.weight")
+             :output-bias (str base "attn.out_proj.bias")
+             :norm2-weight (str base "ln_2.weight")
+             :norm2-bias (str base "ln_2.bias")
+             :fc1-weight (str base "mlp.c_fc.weight")
+             :fc1-bias (str base "mlp.c_fc.bias")
+             :fc2-weight (str base "mlp.c_proj.weight")
+             :fc2-bias (str base "mlp.c_proj.bias")}))
+        layers (mapv layer-spec indices)
+        final-weight (str root "ln_final.weight")
+        final-bias (str root "ln_final.bias")
+        projection (str root "text_projection")
+        required (concat [token-name position-name final-weight final-bias projection]
+                         (mapcat vals layers))]
+    (when (and contiguous? (seq layers) (pos-int? heads) (every? names required))
+      {:token-embedding token-name :position-embedding position-name
+       :layers layers :heads heads :hidden hidden :format :openclip
+       :final-norm-weight final-weight :final-norm-bias final-bias
+       :text-projection projection :return-penultimate? true :eps 1.0e-5})))
 
 (defn infer-clip-spec
   "Infer executable HF CLIP graphs. SD1/SD2 return one encoder; SDXL returns
@@ -125,7 +166,15 @@
                    (filter #(str/ends-with? % token-suffix))
                    (map #(subs % 0 (- (count %) (count token-suffix))))
                    sort vec)
-        specs (vec (keep #(infer-hf-clip-spec checkpoint names %) roots))]
+        hf-specs (keep #(infer-hf-clip-spec checkpoint names %) roots)
+        open-token-suffix "token_embedding.weight"
+        open-roots (->> names
+                        (filter #(and (str/ends-with? % open-token-suffix)
+                                      (not (str/ends-with? % token-suffix))))
+                        (map #(subs % 0 (- (count %) (count open-token-suffix))))
+                        sort vec)
+        open-specs (keep #(infer-openclip-spec checkpoint names %) open-roots)
+        specs (vec (sort-by :hidden (concat hf-specs open-specs)))]
     (cond
       (contains? #{:stable-diffusion-v1 :stable-diffusion-v2} family)
       (when (= 1 (count specs)) (first specs))

@@ -190,6 +190,11 @@ encoders are inferred and executed automatically. Their per-token features are
 concatenated on the hidden dimension (for example 768 + 1280 = 2048), while the
 second encoder supplies pooled conditioning; individual encoder results remain
 available as `:clip-l` and `:clip-g` for audit/debugging.
+Native SDXL OpenCLIP catalogs are also recognized: `transformer.resblocks.*`,
+fused `attn.in_proj_weight/bias`, `ln_final`, and `text_projection` are mapped
+automatically. Fused projections are split into Q/K/V, CLIP-G uses its
+penultimate transformer state, and pooled output is projected before entering
+the dual-conditioning result.
 
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
@@ -199,8 +204,8 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-This is not yet a complete SD/SDXL render: native CompVis/OpenCLIP fused-QKV
-SDXL checkpoint mapping (as distinct from dual HF catalogs), complete
+This is not yet a complete SD/SDXL render: SDXL size/crop micro-conditioning
+and label-embedding execution, complete
 production block/config mapping after family detection, additional
 ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
 precision, and an installed real

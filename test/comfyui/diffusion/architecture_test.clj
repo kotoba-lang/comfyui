@@ -95,3 +95,27 @@
     (is (= :dual (:mode spec)))
     (is (= [12 20] (mapv :heads (:encoders spec))))
     (is (= 2 (count (:encoders spec))))))
+
+(defn- openclip-tensors [root hidden]
+  (let [layer (str root "transformer.resblocks.0.")
+        suffixes ["ln_1.weight" "ln_1.bias" "attn.in_proj_weight"
+                  "attn.in_proj_bias" "attn.out_proj.weight" "attn.out_proj.bias"
+                  "ln_2.weight" "ln_2.bias" "mlp.c_fc.weight" "mlp.c_fc.bias"
+                  "mlp.c_proj.weight" "mlp.c_proj.bias"]]
+    (merge {(str root "token_embedding.weight") {"shape" [100 hidden]}
+            (str root "positional_embedding") {"shape" [77 hidden]}
+            (str root "ln_final.weight") {"shape" [hidden]}
+            (str root "ln_final.bias") {"shape" [hidden]}
+            (str root "text_projection") {"shape" [hidden hidden]}}
+           (into {} (map (fn [suffix] [(str layer suffix) {"shape" [hidden]}]) suffixes)))))
+
+(deftest infers-sdxl-hf-plus-openclip-fused-qkv
+  (let [checkpoint* (update (checkpoint 2048 4 true) :tensors merge
+                            (hf-clip-tensors "conditioner.embedders.0.transformer.text_model."
+                                             768)
+                            (openclip-tensors "conditioner.embedders.1.model." 1280))
+        spec (architecture/infer-clip-spec checkpoint* (architecture/infer checkpoint*))]
+    (is (= [:hf :openclip] (mapv :format (:encoders spec))))
+    (is (= [768 1280] (mapv :hidden (:encoders spec))))
+    (is (:return-penultimate? (second (:encoders spec))))
+    (is (string? (:in-proj-weight (first (:layers (second (:encoders spec)))))))))

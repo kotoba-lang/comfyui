@@ -70,3 +70,37 @@
         (is (= [1 3 12] (:shape (:tensor result))))
         (is (= [1 4] (:shape (:pooled result))))
         (is (= [9.0 8.0 7.0 6.0] (arr/->vec (:pooled result))))))))
+
+(deftest openclip-fused-qkv-penultimate-and-projection-execute
+  (let [identity2 (matrix 2 2 #(if (= %1 %2) 1.0 0.0))
+        zero2 (vector* [0 0])
+        one2 (vector* [1 1])
+        arrays {"token" (matrix 6 2 #(* 0.1 (+ 1 %1 %2)))
+                "position" (matrix 3 2 #(* 0.01 (+ %1 %2)))
+                "n1.w" one2 "n1.b" zero2
+                "in.w" (matrix 6 2 #(if (= (mod %1 2) %2) 1.0 0.0))
+                "in.b" (vector* (repeat 6 0.0))
+                "out.w" identity2 "out.b" zero2
+                "n2.w" one2 "n2.b" zero2
+                "fc1.w" (matrix 4 2 #(if (= (mod %1 2) %2) 0.5 0.0))
+                "fc1.b" (vector* (repeat 4 0.0))
+                "fc2.w" (matrix 2 4 #(if (= (mod %2 2) %1) 0.25 0.0))
+                "fc2.b" zero2 "final.w" one2 "final.b" zero2
+                "projection" identity2}
+        component {:comfyui/read-tensor (fn [_ name] (get arrays name))}
+        layer {:norm1-weight "n1.w" :norm1-bias "n1.b"
+               :in-proj-weight "in.w" :in-proj-bias "in.b"
+               :output-weight "out.w" :output-bias "out.b"
+               :norm2-weight "n2.w" :norm2-bias "n2.b"
+               :fc1-weight "fc1.w" :fc1-bias "fc1.b"
+               :fc2-weight "fc2.w" :fc2-bias "fc2.b"}
+        encode (clip/compile-encoder
+                component backend
+                {:token-embedding "token" :position-embedding "position"
+                 :layers [layer] :heads 1 :final-norm-weight "final.w"
+                 :final-norm-bias "final.b" :return-penultimate? true
+                 :text-projection "projection"})
+        result (encode {:input-ids [1 2 0] :attention-mask [1 1 0]})]
+    (is (= [1 3 2] (:shape (:tensor result))))
+    (is (= [1 2] (:shape (:pooled result))))
+    (is (every? #(Double/isFinite %) (arr/->vec (:tensor result))))))
