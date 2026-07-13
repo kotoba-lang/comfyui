@@ -367,7 +367,7 @@ clojure -M:export-diffusers-metal-spec pipeline.edn \
 clojure -M:real-diffusers-metal-verify
 deno run --allow-all target/real-diffusers-metal-verify.cjs \
   pipeline.edn unet/model.safetensors text_encoder/model.safetensors \
-  vae/model.safetensors
+  vae/model.safetensors output.png
 ```
 
 On Apple M4, `Narsil/tiny-stable-diffusion-torch` completes this verifier with
@@ -407,6 +407,15 @@ matched an independent JVM CPU execution of the same quantized files within the
 existing Metal tolerances, and returned to zero live GPU bytes. Requested
 checkpoint traffic fell from 7,590,224 F32 bytes to 3,795,112 F16 bytes and the
 largest host window from 294,912 to 147,456 bytes.
+
+The Metal verifier now ends at an actual image artifact rather than a pixel
+vector. `comfyui.png-deno` quantizes the final NHWC RGB values to RGB8, emits
+filter-0 scanlines, compresses them with the host `CompressionStream`, and
+writes CRC-populated IHDR/IDAT/IEND chunks without Python, JVM ImageIO, or a PNG
+dependency. The F32 public-checkpoint run emits a valid non-interlaced 16×16 RGB
+PNG of 852 bytes; its fully F16 checkpoint run emits 848 bytes. The verifier
+parses IHDR dimensions itself, requires a non-empty compressed artifact, and an
+external `file` probe recognizes both outputs as 8-bit/color RGB PNG files.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against

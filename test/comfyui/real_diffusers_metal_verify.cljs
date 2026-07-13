@@ -4,6 +4,7 @@
             [comfyui.clip.encoder :as clip]
             [comfyui.diffusion.model :as model]
             [comfyui.diffusion.scheduler :as scheduler]
+            [comfyui.png-deno :as png]
             [comfyui.safetensors-deno :as safe]
             [num.array :as arr]
             [num.deno-gpu :as dg]
@@ -19,7 +20,7 @@
     (and (some floating dtypes)
          (every? #(or (not (floating %)) (= "F16" %)) dtypes))))
 
-(defn -main [& [spec-path unet-path text-path vae-path]]
+(defn -main [& [spec-path unet-path text-path vae-path output-path]]
   (when-not vae-path
     (throw (ex-info "usage: SPEC UNET TEXT_ENCODER VAE" {})))
   (let [{:keys [unet clip vae alphas positive negative]}
@@ -27,7 +28,8 @@
         unet-file (safe/open-file unet-path)
         text-file (safe/open-file text-path)
         vae-file (safe/open-file vae-path)
-        f16? (every? f16-checkpoint? [unet-file text-file vae-file])]
+        f16? (every? f16-checkpoint? [unet-file text-file vae-file])
+        output-path (or output-path "/tmp/comfyui-real-diffusers-metal.png")]
     (-> (dg/request-device)
         (.then
          (fn [request]
@@ -140,14 +142,25 @@
                                      :image-first8 (vec (take 8 image-values))
                                      :baseline baseline :stats stats
                                      :reader-stats reader-stats})))
-                  (println "OK real Diffusers CLIP→2-step UNet→VAE matches"
-                           (if f16? "JVM CPU oracle on" "PyTorch on")
-                           (dg/adapter-description request) "peak-bytes"
-                           (:peak-live-bytes stats) "direct-checkpoint-bytes"
-                           (reduce + (map :direct-bytes reader-stats))
-                           "largest-host-window"
-                           (apply max (map :peak-window-bytes reader-stats))
-                           "checkpoint-dtype" (if f16? "F16" "F32"))))))))
+                  (.then
+                   (png/encode-rgb image-values 16 16)
+                   (fn [png-bytes]
+                     (js/Deno.writeFileSync output-path png-bytes)
+                     (when-not (and (= [16 16] (png/dimensions png-bytes))
+                                    (> (.-byteLength png-bytes) 500))
+                       (throw (ex-info "encoded PNG verification failed"
+                                       {:path output-path
+                                        :bytes (.-byteLength png-bytes)})))
+                     (println "OK real Diffusers CLIP→2-step UNet→VAE matches"
+                              (if f16? "JVM CPU oracle on" "PyTorch on")
+                              (dg/adapter-description request) "peak-bytes"
+                              (:peak-live-bytes stats) "direct-checkpoint-bytes"
+                              (reduce + (map :direct-bytes reader-stats))
+                              "largest-host-window"
+                              (apply max (map :peak-window-bytes reader-stats))
+                              "checkpoint-dtype" (if f16? "F16" "F32")
+                              "png-bytes" (.-byteLength png-bytes)
+                              "output" output-path)))))))))
         (.catch (fn [error]
                   (println "ERROR:" (or (.-stack error) (str error)))
                   (when-let [data (ex-data error)]
