@@ -124,9 +124,14 @@
             (assoc clip-component :comfyui/clip-spec clip-spec
                    :comfyui/encode
                    (clip-encoder/compile-encoder clip-component backend clip-spec))
-            (assoc vae-component :comfyui/model-spec vae-spec
-                   :comfyui/decode
-                   (diffusion-model/compile-decoder vae-component backend vae-spec))])
+            (cond-> (assoc vae-component :comfyui/model-spec vae-spec
+                           :comfyui/decode
+                           (diffusion-model/compile-decoder
+                            vae-component backend vae-spec))
+              (:encoder-layers vae-spec)
+              (assoc :comfyui/encode
+                     (diffusion-model/compile-encoder
+                      vae-component backend vae-spec)))])
          (catch Throwable error
            (doseq [checkpoint @opened] (safe/close! checkpoint))
            (throw error)))))})
@@ -218,6 +223,10 @@
                   (assoc :comfyui/model-spec decoder-spec
                          :comfyui/decode
                          (diffusion-model/compile-decoder
+                          vae-component backend decoder-spec))
+                  (:encoder-layers decoder-spec)
+                  (assoc :comfyui/encode
+                         (diffusion-model/compile-encoder
                           vae-component backend decoder-spec)))
                 clip-component (component checkpoint :clip
                                           ["cond_stage_model." "text_encoder."
@@ -333,6 +342,29 @@
                            (arr/->vec nhwc))
                      [batch height width channels])]
                 [normalized]))))}
+   {:type "VAEEncode"
+    :category "latent"
+    :inputs {:pixels {:type "IMAGE"}
+             :vae {:type "VAE"}}
+    :outputs [{:name "LATENT" :type "LATENT"}]
+    :fn (fn [{:keys [pixels vae]}]
+          (let [encode (:comfyui/encode vae)
+                [batch _height _width channels :as shape] (:shape pixels)]
+            (when-not (and (fn? encode) (= 4 (count shape)) (= 3 channels))
+              (throw (ex-info "VAEEncode requires executable VAE and NHWC RGB pixels"
+                              {:shape shape :vae-keys (keys vae)})))
+            (let [normalized
+                  (arr/from-vec
+                   (:backend pixels)
+                   (mapv #(- (* 2.0 %) 1.0) (arr/->vec pixels))
+                   shape)
+                  nchw (t/transpose normalized [0 3 1 2])
+                  latent (encode nchw)]
+              (when-not (and (= 4 (count (:shape latent)))
+                             (= batch (first (:shape latent))))
+                (throw (ex-info "VAE encoder must return batched NCHW latent"
+                                {:pixels shape :latent (:shape latent)})))
+              [latent])))}
    {:type "SaveImage"
     :category "image"
     :inputs {:images {:type "IMAGE"}

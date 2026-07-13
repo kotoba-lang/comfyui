@@ -118,7 +118,7 @@ upstream ComfyUI.
 
 ## Executable diffusion foundation
 
-`comfyui.nodes.diffusion-runtime/pack` replaces four contracts with real JVM
+`comfyui.nodes.diffusion-runtime/pack` replaces five contracts with real JVM
 execution while retaining the upstream class names and wire types:
 
 - `CheckpointLoaderSimple` opens and validates a real safetensors file, keeps
@@ -147,6 +147,12 @@ execution while retaining the upstream class names and wire types:
   slicing. DDIM noises an existing latent in alpha space for partial denoise;
   sigma samplers use `latent + sigma*noise`. Unsupported sampler
   combinations fail explicitly instead of silently changing algorithms.
+- `VAEEncode` normalizes NHWC RGB `[0,1]` into NCHW `[-1,1]`, executes the
+  checkpoint encoder, selects the diagonal-Gaussian posterior mean, and applies
+  the model scaling factor. Its output connects directly to partial-denoise
+  `KSampler`; `VAEDecode` performs the inverse latent-to-image path. Encoder
+  downsampling reproduces Diffusers' asymmetric right/bottom zero padding
+  before its stride-2 convolution.
 
 ```clojure
 (require '[comfyui.node :as node]
@@ -239,12 +245,14 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
-Diffusers `AutoencoderKL` decoder files are inferred directly from their
-`config.json`: post-quant projection, mid-block ResNets and spatial self-
-attention, every up block, final normalization, and RGB convolution execute
-without renaming tensors. The real-checkpoint verifier decodes the published
-tiny Stable Diffusion VAE while proving that all 70 decoder tensors are loaded
-and no encoder tensor is touched:
+Diffusers `AutoencoderKL` files are inferred directly from their `config.json`.
+The decoder executes post-quant projection, mid-block ResNets and spatial self-
+attention, every up block, final normalization, and RGB convolution. The encoder
+executes every down block/downsample, its own mid-block attention, quant projection,
+posterior-mean selection, and latent scaling without renaming tensors. Decoder and
+encoder retain independent lazy tensor caches. The real-checkpoint verifier decodes
+and then re-encodes the published tiny Stable Diffusion VAE, proving both paths load
+their actual tensor catalogs:
 
 ```sh
 clojure -M:real-diffusers-vae-verify vae.safetensors vae/config.json

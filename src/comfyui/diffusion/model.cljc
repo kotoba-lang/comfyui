@@ -13,7 +13,7 @@
 
 (def ^:private supported-ops
   #{:conv2d :groupnorm :silu :save :add-saved :cat-saved :upsample
-    :scale :add-conditioning :cross-attention :timestep-bias :timestep-embedding
+    :scale :pad-right-bottom :take-channels :add-conditioning :cross-attention :timestep-bias :timestep-embedding
     :timestep-vector :sdxl-label-embedding :add-embedding :resblock
     :spatial-transformer :vae-attention})
 
@@ -92,6 +92,43 @@
       (fail "embedding projection must produce one value per channel"
             {:projected (:shape projected) :value (:shape value)}))
     (t/add value (t/reshape projected [1 channels 1 1]))))
+
+(defn- take-channels [value channels]
+  (let [[batch input-channels height width :as shape] (:shape value)]
+    (when-not (and (= 4 (count shape)) (pos-int? channels)
+                   (<= channels input-channels))
+      (fail "take-channels requires NCHW and a valid channel count"
+            {:shape shape :channels channels}))
+    (let [plane (* height width)
+          source (arr/->vec value)
+          output (vec
+                  (mapcat (fn [n]
+                            (let [start (* n input-channels plane)]
+                              (subvec source start (+ start (* channels plane)))))
+                          (range batch)))]
+      (arr/from-vec (:backend value) output [batch channels height width]
+                    (:dtype value)))))
+
+(defn- pad-right-bottom [value]
+  (let [[batch channels height width :as shape] (:shape value)]
+    (when-not (= 4 (count shape))
+      (fail "pad-right-bottom requires NCHW" {:shape shape}))
+    (let [source (arr/->vec value)
+          padded-width (inc width)
+          output (vec
+                  (for [n (range batch)
+                        c (range channels)
+                        y (range (inc height))
+                        x (range padded-width)]
+                    (if (or (= y height) (= x width))
+                      0.0
+                      (nth source (+ (* n channels height width)
+                                     (* c height width)
+                                     (* y width)
+                                     x)))))]
+      (arr/from-vec (:backend value) output
+                    [batch channels (inc height) padded-width]
+                    (:dtype value)))))
 
 (defn- resblock [value embedding tensor! layer]
   (let [groups (or (:groups layer) 32)
@@ -453,6 +490,12 @@
                    :vae-attention
                    (assoc state :value (vae-attention value tensor! layer))
 
+                   :pad-right-bottom
+                   (assoc state :value (pad-right-bottom value))
+
+                   :take-channels
+                   (assoc state :value (take-channels value (:channels layer)))
+
                    :timestep-bias
                    (let [bias (* (double (or (:scale layer) 1.0)) (double timestep))
                          scalar (arr/from-vec (:backend value) [bias] [])]
@@ -480,3 +523,11 @@
   [component backend spec]
   (let [graph (compile-graph component backend spec false)]
     (with-meta (fn [latent] (graph latent 0 nil)) (meta graph))))
+
+(defn compile-encoder
+  "Compile a checkpoint-backed image-to-latent graph. Encoder specs retain
+  decoder layers separately under `:layers` and expose `:encoder-layers`."
+  [component backend spec]
+  (let [graph (compile-graph component backend
+                             (assoc spec :layers (:encoder-layers spec)) false)]
+    (with-meta (fn [image] (graph image 0 nil)) (meta graph))))

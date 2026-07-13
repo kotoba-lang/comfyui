@@ -12,6 +12,32 @@
             (if (= row column) scale 0.0)))
         (range (* rows columns))))
 
+(deftest vae-encoder-selects-posterior-mean-and-scales-latent
+  (let [encode (model/compile-encoder
+                {:comfyui/read-tensor (fn [_ name]
+                                        (throw (ex-info "unexpected tensor" {:name name})))}
+                backend
+                {:layers []
+                 :encoder-layers [{:op :take-channels :channels 3}
+                                  {:op :scale :factor 0.5}]})
+        moments (arr/from-vec backend [1 2, 3 4, 5 6, 7 8, 9 10, 11 12]
+                              [1 6 1 2])
+        latent (encode moments)]
+    (is (= [1 3 1 2] (:shape latent)))
+    (is (= [0.5 1.0, 1.5 2.0, 2.5 3.0] (arr/->vec latent)))))
+
+(deftest vae-encoder-pads-only-right-and-bottom
+  (let [encode (model/compile-encoder
+                {:comfyui/read-tensor (fn [_ name]
+                                        (throw (ex-info "unexpected tensor" {:name name})))}
+                backend
+                {:layers [] :encoder-layers [{:op :pad-right-bottom}]})
+        input (arr/from-vec backend [1 2, 3 4] [1 1 2 2])
+        output (encode input)]
+    (is (= [1 1 3 3] (:shape output)))
+    (is (= [1.0 2.0 0.0, 3.0 4.0 0.0, 0.0 0.0 0.0]
+           (arr/->vec output)))))
+
 (deftest vae-spatial-self-attention-executes-and-caches
   (let [identity (arr/from-vec backend (identity-values 2 2 1.0) [2 2])
         zeros (arr/from-vec backend [0 0] [2])

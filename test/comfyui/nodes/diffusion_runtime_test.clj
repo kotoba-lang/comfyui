@@ -207,6 +207,43 @@
                                               :denoise 0.0}}}]
            (exec/execute {:registry registry :cache nil} workflow))))))
 
+(deftest vae-encode-partial-sample-decode-runs-as-one-workflow
+  (let [registry (node/registry (runtime/pack {:backend backend}))
+        encoded-input (atom nil)
+        pixels (arr/from-vec backend [0.0 0.5 1.0, 0.25 0.75 0.5]
+                             [1 1 2 3])
+        vae {:comfyui/component :vae
+             :comfyui/encode
+             (fn [nchw]
+               (reset! encoded-input nchw)
+               (arr/from-vec backend [0.1 0.2, 0.3 0.4, 0.5 0.6, 0.7 0.8]
+                             [1 4 1 2]))
+             :comfyui/decode
+             (fn [latent]
+               (let [values (arr/->vec latent)]
+                 (arr/from-vec backend (vec (take 6 values)) [1 3 1 2])))}
+        conditioning (arr/zeros backend [1 4 1 2])
+        model {:comfyui/alphas-cumprod [0.95 0.8 0.6 0.4]
+               :comfyui/denoise (fn [sample _ _]
+                                  (arr/zeros backend (:shape sample)))}
+        workflow
+        {"encode" {:class_type "VAEEncode" :inputs {:pixels pixels :vae vae}}
+         "sample" {:class_type "KSampler"
+                    :inputs {:model model :positive conditioning
+                             :negative conditioning :latent_image ["encode" 0]
+                             :seed 77 :steps 2 :cfg 1.0
+                             :sampler_name "dpmpp_2m" :scheduler "karras"
+                             :denoise 0.5}}
+         "decode" {:class_type "VAEDecode"
+                    :inputs {:samples ["sample" 0] :vae vae}}}
+        result (exec/execute {:registry registry :cache nil} workflow)
+        image (get-in result [:results "decode" 0])]
+    (is (= ["encode" "sample" "decode"] (:executed result)))
+    (is (= [1 3 1 2] (:shape @encoded-input)))
+    (is (= [-1.0 -0.5, 0.0 0.5, 1.0 0.0] (arr/->vec @encoded-input)))
+    (is (= [1 1 2 3] (:shape image)))
+    (is (every? #(<= 0.0 % 1.0) (arr/->vec image)))))
+
 (deftest checkpoint-backed-unet-graph-runs-through-ksampler
   (let [prefix "model.diffusion_model."
         tensors

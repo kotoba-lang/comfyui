@@ -281,13 +281,28 @@
                "decoder.up_blocks.0.upsamplers.0.conv.bias"
                "decoder.conv_norm_out.weight" "decoder.conv_norm_out.bias"
                "decoder.conv_out.weight" "decoder.conv_out.bias"]
-        names (concat fixed
+        encoder-resnet-prefixes
+        (concat ["encoder.mid_block.resnets.0." "encoder.mid_block.resnets.1."]
+                (for [block (range 2)]
+                  (str "encoder.down_blocks." block ".resnets.0.")))
+        encoder-attention-prefix "encoder.mid_block.attentions.0."
+        encoder-fixed ["encoder.conv_in.weight" "encoder.conv_in.bias"
+                       "encoder.down_blocks.0.downsamplers.0.conv.weight"
+                       "encoder.down_blocks.0.downsamplers.0.conv.bias"
+                       "encoder.conv_norm_out.weight" "encoder.conv_norm_out.bias"
+                       "encoder.conv_out.weight" "encoder.conv_out.bias"
+                       "quant_conv.weight" "quant_conv.bias"]
+        names (concat fixed encoder-fixed
                       (for [prefix resnet-prefixes suffix resnet-suffixes]
                         (str prefix suffix))
-                      (map #(str attention-prefix %) attention-suffixes))
+                      (map #(str attention-prefix %) attention-suffixes)
+                      (for [prefix encoder-resnet-prefixes suffix resnet-suffixes]
+                        (str prefix suffix))
+                      (map #(str encoder-attention-prefix %) attention-suffixes))
         checkpoint* {:tensors (into {} (map (fn [name] [name {"shape" [1]}]) names))}
         config {"_class_name" "AutoencoderKL" "block_out_channels" [32 64]
                 "up_block_types" ["UpDecoderBlock2D" "UpDecoderBlock2D"]
+                "down_block_types" ["DownEncoderBlock2D" "DownEncoderBlock2D"]
                 "layers_per_block" 1 "norm_num_groups" 32
                 "latent_channels" 4 "out_channels" 3 "scaling_factor" 0.18215}
         spec (architecture/infer-diffusers-vae-spec checkpoint* config)]
@@ -298,5 +313,12 @@
     (is (= 6 (count (filter #(= :resblock (:op %)) (:layers spec)))))
     (is (= [:groupnorm :silu :conv2d]
            (mapv :op (take-last 3 (:layers spec)))))
+    (is (= [:conv2d :resblock :pad-right-bottom :conv2d]
+           (mapv :op (take 4 (:encoder-layers spec)))))
+    (is (= [:conv2d :take-channels :scale]
+           (mapv :op (take-last 3 (:encoder-layers spec)))))
+    (is (nil? (:encoder-layers
+               (architecture/infer-diffusers-vae-spec
+                (update checkpoint* :tensors dissoc "quant_conv.bias") config))))
     (is (nil? (architecture/infer-diffusers-vae-spec
                (update checkpoint* :tensors dissoc "decoder.conv_out.bias") config)))))
