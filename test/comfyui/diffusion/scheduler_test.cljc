@@ -44,3 +44,23 @@
                  (scheduler/ddim-step sample epsilon 0.4 0.6 {:eta 0.5})))
     (is (number? (:sigma (scheduler/ddim-step sample epsilon 0.4 0.6
                                                {:eta 0.5 :noise noise}))))))
+
+(deftest iterative-ddim-runs-cfg-over-descending-timesteps
+  (let [sample (arr/from-vec backend [2.0] [1])
+        uncond (arr/from-vec backend [0.1] [1])
+        cond (arr/from-vec backend [0.3] [1])
+        events (atom [])
+        result (scheduler/ddim-sample
+                {:sample sample
+                 :alphas [0.9 0.7 0.5]
+                 :timesteps [2 1]
+                 :negative uncond :positive cond :cfg 2.0
+                 :denoise-fn (fn [_ _ conditioning] conditioning)
+                 :on-step #(swap! events conj %)})
+        guided (scheduler/classifier-free-guidance uncond cond 2.0)
+        step1 (:previous-sample (scheduler/ddim-step sample guided 0.5 0.7))
+        expected (:previous-sample (scheduler/ddim-step step1 guided 0.7 1.0))]
+    (is (= [2 0] (scheduler/select-timesteps 3 2)))
+    (is (= [2 1] (mapv :timestep @events)))
+    (is (approx? (first (arr/->vec expected))
+                 (first (arr/->vec (:sample result)))))))

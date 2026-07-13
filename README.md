@@ -117,7 +117,7 @@ upstream ComfyUI.
 
 ## Executable diffusion foundation
 
-`comfyui.nodes.diffusion-runtime/pack` replaces three contracts with real JVM
+`comfyui.nodes.diffusion-runtime/pack` replaces four contracts with real JVM
 execution while retaining the upstream class names and wire types:
 
 - `CheckpointLoaderSimple` opens and validates a real safetensors file, keeps
@@ -127,6 +127,11 @@ execution while retaining the upstream class names and wire types:
 - `EmptyLatentImage` allocates `[batch,4,height/8,width/8]` NCHW latent storage.
 - `DDIMStep` performs the real epsilon-prediction transition, including the
   deterministic path and eta/noise variance path, inside `comfyui.exec`.
+- `KSampler` selects descending training timesteps and repeatedly invokes an
+  injected model denoiser with positive/negative conditioning, applies
+  classifier-free guidance, and advances the latent through DDIM. The current
+  executable subset is `ddim` + `normal` + full denoise; unsupported sampler
+  combinations fail explicitly instead of silently changing algorithms.
 
 ```clojure
 (require '[comfyui.node :as node]
@@ -144,15 +149,16 @@ The safetensors tests construct valid binary checkpoint payloads and prove
 window bounds plus F16/BF16/F32 decoding; runtime tests execute checkpoint
 loading, lazy tensor materialization, latent allocation, and DDIM through the
 actual graph executor. This is not yet a complete SD/SDXL render: CLIP
-tokenization/encoding, full trained UNet/DiT graph lowering, iterative KSampler,
-VAE decode, image codec/save, device-native NCHW kernels, and an installed real
-checkpoint for end-to-end image comparison remain required. Production image
+tokenization/encoding, full trained UNet/DiT graph lowering, non-DDIM sampler
+families/schedulers, VAE decode, image codec/save, device-native NCHW kernels,
+and an installed real checkpoint for end-to-end image comparison remain
+required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 
 ## Tests / example
 
 ```sh
-clojure -M:test     # 10 tests, 47 assertions
+clojure -M:test
 clojure -Sdeps '{:paths ["src" "examples"]
                  :deps {io.github.com-junkawasaki/langchain-clj
                         {:git/tag "v0.1.0" :git/sha "ae475c9"}}}' \

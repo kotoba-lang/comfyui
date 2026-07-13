@@ -5,7 +5,8 @@
   (:require [clojure.string :as str]
             [comfyui.diffusion.scheduler :as scheduler]
             [comfyui.safetensors :as safe]
-            [num.array :as arr]))
+            [num.array :as arr])
+  (:import [java.util Random]))
 
 (defn- component [checkpoint kind prefixes]
   (let [names (filterv #(some (fn [prefix] (str/starts-with? % prefix)) prefixes)
@@ -65,8 +66,48 @@
              :noise {:type "LATENT" :optional true}}
     :outputs [{:name "previous_sample" :type "LATENT"}
               {:name "predicted_original_sample" :type "LATENT"}]
-    :fn (fn [{:keys [sample epsilon alpha alpha_prev eta noise]}]
+   :fn (fn [{:keys [sample epsilon alpha alpha_prev eta noise]}]
           (let [{:keys [previous-sample predicted-original-sample]}
                 (scheduler/ddim-step sample epsilon alpha alpha_prev
                                      {:eta eta :noise noise})]
-            [previous-sample predicted-original-sample]))}])
+            [previous-sample predicted-original-sample]))}
+   {:type "KSampler"
+    :category "sampling"
+    :inputs {:model {:type "MODEL"}
+             :positive {:type "CONDITIONING"}
+             :negative {:type "CONDITIONING"}
+             :latent_image {:type "LATENT"}
+             :seed {:type "INT" :default 0}
+             :steps {:type "INT" :default 20}
+             :cfg {:type "FLOAT" :default 7.0}
+             :sampler_name {:type "STRING" :default "ddim"}
+             :scheduler {:type "STRING" :default "normal"}
+             :denoise {:type "FLOAT" :default 1.0}}
+    :outputs [{:name "LATENT" :type "LATENT"}]
+    :fn (fn [{:keys [model positive negative latent_image seed steps cfg
+                     sampler_name scheduler denoise]}]
+          (when-not (and (= "ddim" sampler_name) (= "normal" scheduler)
+                         (= 1.0 (double denoise)))
+            (throw (ex-info "runtime KSampler currently supports ddim/normal/full-denoise"
+                            {:sampler-name sampler_name :scheduler scheduler :denoise denoise})))
+          (let [denoise-fn (:comfyui/denoise model)
+                alphas (:comfyui/alphas-cumprod model)
+                sample (if (and (map? latent_image) (contains? latent_image :samples))
+                         (:samples latent_image)
+                         latent_image)
+                _ (when-not (and (fn? denoise-fn) (seq alphas) sample)
+                    (throw (ex-info "MODEL lacks executable denoiser or alpha schedule"
+                                    {:model-keys (keys model)})))
+                random (Random. (long seed))
+                noise-fn (fn [shape _]
+                           (arr/from-vec (:backend sample)
+                                         (repeatedly (arr/nelems shape) #(.nextGaussian random))
+                                         shape))
+                result (scheduler/ddim-sample
+                        {:sample sample
+                         :alphas alphas
+                         :timesteps (scheduler/select-timesteps (count alphas) steps)
+                         :denoise-fn denoise-fn
+                         :positive positive :negative negative :cfg cfg
+                         :eta 0.0 :noise-fn noise-fn})]
+            [(:sample result)]))}])

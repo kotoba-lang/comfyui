@@ -75,3 +75,20 @@
                            (first (arr/->vec x0))))
            1.0e-10))
     (is (= [1 1 1 1] (:shape previous)))))
+
+(deftest ksampler-node-runs-iterative-cfg-denoising
+  (let [registry (node/registry (runtime/pack {:backend backend}))
+        sample (arr/from-vec backend [2.0] [1 1 1 1])
+        negative (arr/from-vec backend [0.1] [1 1 1 1])
+        positive (arr/from-vec backend [0.3] [1 1 1 1])
+        model {:comfyui/alphas-cumprod [0.9 0.7 0.5]
+               :comfyui/denoise (fn [_sample _timestep conditioning] conditioning)}
+        workflow {"sample" {:class_type "KSampler"
+                             :inputs {:model model :positive positive :negative negative
+                                      :latent_image sample :seed 7 :steps 2 :cfg 2.0
+                                      :sampler_name "ddim" :scheduler "normal"
+                                      :denoise 1.0}}}
+        output (get-in (exec/execute {:registry registry} workflow)
+                       [:results "sample" 0])]
+    (is (= [1 1 1 1] (:shape output)))
+    (is (not= (arr/->vec sample) (arr/->vec output)))))

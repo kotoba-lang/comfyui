@@ -49,7 +49,7 @@
    (when-not (= (:shape sample) (:shape epsilon))
      (throw (ex-info "sample/epsilon shapes differ"
                      {:sample (:shape sample) :epsilon (:shape epsilon)})))
-   (when-not (and (< 0 alpha 1.0) (< 0 alpha-prev 1.0) (<= 0 eta))
+   (when-not (and (< 0 alpha 1.0) (< 0 alpha-prev) (<= alpha-prev 1.0) (<= 0 eta))
      (throw (ex-info "invalid DDIM coefficients"
                      {:alpha alpha :alpha-prev alpha-prev :eta eta})))
    (let [predicted-x0 (scale (t/sub sample (scale epsilon (Math/sqrt (- 1.0 alpha))))
@@ -69,3 +69,57 @@
      {:previous-sample previous
       :predicted-original-sample predicted-x0
       :sigma sigma})))
+
+(defn classifier-free-guidance
+  "`unconditional + cfg * (conditional - unconditional)`."
+  [unconditional conditional cfg]
+  (when-not (= (:shape unconditional) (:shape conditional))
+    (throw (ex-info "CFG epsilon shapes differ"
+                    {:unconditional (:shape unconditional)
+                     :conditional (:shape conditional)})))
+  (t/add unconditional (scale (t/sub conditional unconditional) cfg)))
+
+(defn select-timesteps
+  "Select `steps` evenly-spaced training timestep indices, descending."
+  [training-steps steps]
+  (when-not (and (pos-int? training-steps) (pos-int? steps) (<= steps training-steps))
+    (throw (ex-info "invalid inference timestep count"
+                    {:training-steps training-steps :steps steps})))
+  (if (= steps 1)
+    [(dec training-steps)]
+    (mapv (fn [i]
+            (long (Math/round (* (- 1.0 (/ i (double (dec steps))))
+                                 (dec training-steps)))))
+          (range steps))))
+
+(defn ddim-sample
+  "Iterative classifier-free-guided DDIM sampling.
+
+  `denoise-fn` receives `(sample timestep conditioning)` and returns predicted
+  epsilon. `alphas` is the model training schedule; `timesteps` are descending
+  indices into it. `noise-fn`, required only for eta>0, receives
+  `(shape timestep)`. Returns the final latent and per-step audit history."
+  [{:keys [sample alphas timesteps denoise-fn positive negative cfg eta noise-fn on-step]
+    :or {cfg 1.0 eta 0.0}}]
+  (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn))
+    (throw (ex-info "DDIM sampler requires sample, alphas, timesteps, and denoise-fn" {})))
+  (loop [current sample remaining (seq timesteps) history []]
+    (if-let [timestep (first remaining)]
+      (let [next-timestep (second remaining)
+            alpha (double (nth alphas timestep))
+            alpha-prev (if (some? next-timestep)
+                         (double (nth alphas next-timestep))
+                         1.0)
+            unconditional (denoise-fn current timestep negative)
+            conditional (denoise-fn current timestep positive)
+            epsilon (classifier-free-guidance unconditional conditional cfg)
+            noise (when (pos? eta)
+                    (when-not noise-fn
+                      (throw (ex-info "DDIM eta>0 requires noise-fn" {:eta eta})))
+                    (noise-fn (:shape current) timestep))
+            step (ddim-step current epsilon alpha alpha-prev {:eta eta :noise noise})
+            event {:timestep timestep :alpha alpha :alpha-prev alpha-prev
+                   :sigma (:sigma step)}]
+        (when on-step (on-step event))
+        (recur (:previous-sample step) (next remaining) (conj history event)))
+      {:sample current :history history})))
