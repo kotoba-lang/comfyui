@@ -1,7 +1,7 @@
 (ns comfyui.nodes.diffusion-runtime
   "Executable JVM diffusion nodes. Unlike `comfyui.nodes.diffusion`'s shape
-  contracts, every node in this pack performs real work: checkpoint catalog
-  loading, latent allocation, or a DDIM transition."
+  contracts, every node in this pack performs real work: image I/O, checkpoint
+  execution, latent allocation, or sampling."
   (:require [clojure.string :as str]
             [comfyui.clip.encoder :as clip-encoder]
             [comfyui.diffusion.architecture :as architecture]
@@ -47,6 +47,40 @@
              (throw (ex-info "no PNG ImageIO writer available" {})))
            {:filename filename :subfolder "" :type "output" :path (str path)}))
        (range batch)))))
+
+(defn- load-image [backend input-directory filename]
+  (when-not (and backend input-directory (string? filename) (not (str/blank? filename)))
+    (throw (ex-info "LoadImage requires backend, :input-directory, and filename"
+                    {:filename filename})))
+  (let [directory (.toRealPath
+                   (Paths/get (str input-directory) (make-array String 0))
+                   (make-array java.nio.file.LinkOption 0))
+        candidate (.normalize (.resolve directory filename))
+        path (when (Files/isRegularFile candidate
+                                        (make-array java.nio.file.LinkOption 0))
+               (.toRealPath candidate (make-array java.nio.file.LinkOption 0)))]
+    (when-not (and path (.startsWith path directory))
+      (throw (ex-info "LoadImage path must be a file inside :input-directory"
+                      {:filename filename :input-directory (str directory)})))
+    (let [image (ImageIO/read (.toFile path))]
+      (when-not image
+        (throw (ex-info "ImageIO could not decode image" {:path (str path)})))
+      (let [width (.getWidth image)
+            height (.getHeight image)
+            pixels (vec
+                    (for [y (range height) x (range width) channel [16 8 0]]
+                      (/ (double (bit-and 0xff
+                                          (bit-shift-right (.getRGB image x y)
+                                                           channel)))
+                         255.0)))
+            mask (vec
+                  (for [y (range height) x (range width)]
+                    (- 1.0 (/ (double (bit-and 0xff
+                                              (unsigned-bit-shift-right
+                                               (.getRGB image x y) 24)))
+                              255.0))))]
+        [(arr/from-vec backend pixels [1 height width 3])
+         (arr/from-vec backend mask [1 height width])]))))
 
 (defn- component [checkpoint kind prefixes]
   (let [names (filterv #(some (fn [prefix] (str/starts-with? % prefix)) prefixes)
@@ -147,6 +181,7 @@
   - `:diffusers-vae-config` AutoencoderKL config map, or resolver function
   - `:resolve-diffusers-pipeline` resolves a pipeline name to separate UNet,
     text encoder, and VAE paths plus their configs and scheduler config
+  - `:input-directory` root for executable LoadImage files
   - `:output-directory` destination for executable SaveImage PNG files
   - `:clip-tokenizer` OpenAI CLIP BPE tokenizer function
   - `:clip-spec` checkpoint transformer graph for CLIP encoding
@@ -157,9 +192,14 @@
   `:comfyui/checkpoint` when the workflow/model unloads."
   [{:keys [backend resolve-checkpoint model-spec diffusers-config
            vae-spec diffusers-vae-config clip-spec alphas-cumprod
-           resolve-diffusers-pipeline output-directory clip-tokenizer]
+           resolve-diffusers-pipeline input-directory output-directory clip-tokenizer]
     :or {resolve-checkpoint identity}}]
-  [{:type "CheckpointLoaderSimple"
+  [{:type "LoadImage"
+    :category "image"
+    :inputs {:image {:type "STRING"}}
+    :outputs [{:name "IMAGE" :type "IMAGE"} {:name "MASK" :type "MASK"}]
+    :fn (fn [{:keys [image]}] (load-image backend input-directory image))}
+   {:type "CheckpointLoaderSimple"
     :category "loaders"
     :inputs {:ckpt_name {:type "STRING"}}
     :outputs [{:name "MODEL" :type "MODEL"}

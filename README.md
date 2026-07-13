@@ -118,9 +118,12 @@ upstream ComfyUI.
 
 ## Executable diffusion foundation
 
-`comfyui.nodes.diffusion-runtime/pack` replaces five contracts with real JVM
+`comfyui.nodes.diffusion-runtime/pack` replaces six contracts with real JVM
 execution while retaining the upstream class names and wire types:
 
+- `LoadImage` decodes an input-directory-confined image through ImageIO into
+  batched NHWC RGB `[0,1]` and emits ComfyUI's inverse-alpha mask. Canonical
+  path checks reject traversal and symlink escapes.
 - `CheckpointLoaderSimple` opens and validates a real safetensors file, keeps
   tensor payloads lazy on disk, partitions MODEL/CLIP/VAE tensor catalogs by
   checkpoint prefixes, and decodes requested F16, BF16, F32, F64, signed, or

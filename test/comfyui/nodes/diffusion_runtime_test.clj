@@ -9,9 +9,11 @@
             [comfyui.safetensors :as safe]
             [num.array :as arr]
             [num.cpu :as cpu])
-  (:import [java.nio ByteBuffer ByteOrder]
+  (:import [java.awt.image BufferedImage]
+           [java.nio ByteBuffer ByteOrder]
            [java.nio.file Files OpenOption]
-           [java.nio.file.attribute FileAttribute]))
+           [java.nio.file.attribute FileAttribute]
+           [javax.imageio ImageIO]))
 
 (def backend (cpu/cpu-backend))
 
@@ -208,10 +210,16 @@
            (exec/execute {:registry registry :cache nil} workflow))))))
 
 (deftest vae-encode-partial-sample-decode-runs-as-one-workflow
-  (let [registry (node/registry (runtime/pack {:backend backend}))
+  (let [input-dir (Files/createTempDirectory
+                   "comfyui-load-image-" (make-array FileAttribute 0))
+        image-path (.resolve input-dir "seed.png")
+        source (BufferedImage. 2 1 BufferedImage/TYPE_INT_ARGB)
+        _ (.setRGB source 0 0 (unchecked-int 0xff0080ff))
+        _ (.setRGB source 1 0 (unchecked-int 0x4040c080))
+        _ (ImageIO/write source "png" (.toFile image-path))
+        registry (node/registry
+                  (runtime/pack {:backend backend :input-directory input-dir}))
         encoded-input (atom nil)
-        pixels (arr/from-vec backend [0.0 0.5 1.0, 0.25 0.75 0.5]
-                             [1 1 2 3])
         vae {:comfyui/component :vae
              :comfyui/encode
              (fn [nchw]
@@ -227,7 +235,8 @@
                :comfyui/denoise (fn [sample _ _]
                                   (arr/zeros backend (:shape sample)))}
         workflow
-        {"encode" {:class_type "VAEEncode" :inputs {:pixels pixels :vae vae}}
+        {"image" {:class_type "LoadImage" :inputs {:image "seed.png"}}
+         "encode" {:class_type "VAEEncode" :inputs {:pixels ["image" 0] :vae vae}}
          "sample" {:class_type "KSampler"
                     :inputs {:model model :positive conditioning
                              :negative conditioning :latent_image ["encode" 0]
@@ -237,10 +246,17 @@
          "decode" {:class_type "VAEDecode"
                     :inputs {:samples ["sample" 0] :vae vae}}}
         result (exec/execute {:registry registry :cache nil} workflow)
+        mask (get-in result [:results "image" 1])
         image (get-in result [:results "decode" 0])]
-    (is (= ["encode" "sample" "decode"] (:executed result)))
+    (is (= ["image" "encode" "sample" "decode"] (:executed result)))
+    (is (= [1 1 2] (:shape mask)))
+    (is (= [0.0 (/ 191.0 255.0)] (arr/->vec mask)))
     (is (= [1 3 1 2] (:shape @encoded-input)))
-    (is (= [-1.0 -0.5, 0.0 0.5, 1.0 0.0] (arr/->vec @encoded-input)))
+    (is (every? true?
+                (map #(< (Math/abs (- %1 %2)) 1.0e-12)
+                     [-1.0 (/ -127.0 255.0), (/ 1.0 255.0) (/ 129.0 255.0),
+                      1.0 (/ 1.0 255.0)]
+                     (arr/->vec @encoded-input))))
     (is (= [1 1 2 3] (:shape image)))
     (is (every? #(<= 0.0 % 1.0) (arr/->vec image)))))
 
