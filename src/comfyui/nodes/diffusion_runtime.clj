@@ -67,6 +67,7 @@
   - `:resolve-checkpoint` maps ComfyUI's ckpt_name to a filesystem path
   - `:model-spec` graph map, or `(fn [ckpt-name checkpoint] graph-map)`
   - `:vae-spec` decoder graph map, or resolver function
+  - `:diffusers-vae-config` AutoencoderKL config map, or resolver function
   - `:output-directory` destination for executable SaveImage PNG files
   - `:clip-tokenizer` OpenAI CLIP BPE tokenizer function
   - `:clip-spec` checkpoint transformer graph for CLIP encoding
@@ -75,7 +76,7 @@
   The MODEL/CLIP/VAE maps share one lazy SafeTensorFile. The host owns its
   lifecycle and closes `:comfyui/checkpoint` when the workflow/model unloads."
   [{:keys [backend resolve-checkpoint model-spec diffusers-config
-           vae-spec clip-spec alphas-cumprod
+           vae-spec diffusers-vae-config clip-spec alphas-cumprod
            output-directory clip-tokenizer]
     :or {resolve-checkpoint identity}}]
   [{:type "CheckpointLoaderSimple"
@@ -116,8 +117,16 @@
                                     alphas-cumprod)
                 alphas (or configured-alphas
                            (architecture/default-alphas-cumprod architecture-info))
-                decoder-spec (if (fn? vae-spec)
-                               (vae-spec ckpt_name checkpoint) vae-spec)
+                resolved-diffusers-vae-config
+                (if (fn? diffusers-vae-config)
+                  (diffusers-vae-config ckpt_name checkpoint)
+                  diffusers-vae-config)
+                configured-decoder-spec (if (fn? vae-spec)
+                                          (vae-spec ckpt_name checkpoint) vae-spec)
+                decoder-spec (or configured-decoder-spec
+                                 (when resolved-diffusers-vae-config
+                                   (architecture/infer-diffusers-vae-spec
+                                    checkpoint resolved-diffusers-vae-config)))
                 executable-model
                 (cond-> (assoc model-component :comfyui/architecture architecture-info)
                   effective-spec (assoc :comfyui/model-spec effective-spec
@@ -126,7 +135,8 @@
                                model-component backend effective-spec))
                   alphas (assoc :comfyui/alphas-cumprod (vec alphas)))
                 vae-component (component checkpoint :vae
-                                         ["first_stage_model." "vae."])
+                                         (cond-> ["first_stage_model." "vae."]
+                                           resolved-diffusers-vae-config (conj "")))
                 executable-vae
                 (cond-> vae-component
                   decoder-spec

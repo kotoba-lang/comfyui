@@ -229,11 +229,21 @@ codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
+Diffusers `AutoencoderKL` decoder files are inferred directly from their
+`config.json`: post-quant projection, mid-block ResNets and spatial self-
+attention, every up block, final normalization, and RGB convolution execute
+without renaming tensors. The real-checkpoint verifier decodes the published
+tiny Stable Diffusion VAE while proving that all 70 decoder tensors are loaded
+and no encoder tensor is touched:
+
+```sh
+clojure -M:real-diffusers-vae-verify vae.safetensors vae/config.json
+```
+
 This is not yet a verified production SD/SDXL render: the complete automatic
 UNet mapping still needs full-size validation against installed upstream
 checkpoints, and additional
-ancestral/DPM sampler families, full upstream VAE architecture mapping, mixed
-precision, and an installed real
+ancestral/DPM sampler families, additional VAE variants, mixed precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 

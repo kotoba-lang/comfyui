@@ -585,3 +585,94 @@
        :sample-size (long (getc "sample_size"))
        :cross-attention-dim (long (getc "cross_attention_dim"))
        :layers layers})))
+
+(defn- diffusers-vae-resblock [names prefix groups]
+  (let [optional (fn [suffix] (let [name (str prefix suffix)] (when (names name) name)))
+        layer {:op :resblock :groups groups
+               :in-norm-weight (str prefix "norm1.weight")
+               :in-norm-bias (str prefix "norm1.bias")
+               :in-conv-weight (str prefix "conv1.weight")
+               :in-conv-bias (str prefix "conv1.bias")
+               :out-norm-weight (str prefix "norm2.weight")
+               :out-norm-bias (str prefix "norm2.bias")
+               :out-conv-weight (str prefix "conv2.weight")
+               :out-conv-bias (str prefix "conv2.bias")
+               :skip-weight (optional "conv_shortcut.weight")
+               :skip-bias (optional "conv_shortcut.bias")}
+        required (remove nil? (vals (dissoc layer :op :groups)))]
+    (when (every? names required) layer)))
+
+(defn- diffusers-vae-attention [names prefix groups]
+  (let [layer {:op :vae-attention :groups groups
+               :norm-weight (str prefix "group_norm.weight")
+               :norm-bias (str prefix "group_norm.bias")
+               :query-weight (str prefix "to_q.weight")
+               :query-bias (str prefix "to_q.bias")
+               :key-weight (str prefix "to_k.weight")
+               :key-bias (str prefix "to_k.bias")
+               :value-weight (str prefix "to_v.weight")
+               :value-bias (str prefix "to_v.bias")
+               :output-weight (str prefix "to_out.0.weight")
+               :output-bias (str prefix "to_out.0.bias")}
+        required (vals (dissoc layer :op :groups))]
+    (when (every? names required) layer)))
+
+(defn infer-diffusers-vae-spec
+  "Lower a Diffusers AutoencoderKL decoder safetensors file plus config.json
+  into an executable latent-to-RGB graph. Encoder tensors may coexist but are
+  intentionally excluded from the lazy decoder cache."
+  [checkpoint config]
+  (let [names (set (safe/tensor-names checkpoint))
+        getc #(or (get config %) (get config (keyword %)))
+        channels (vec (getc "block_out_channels"))
+        groups (long (or (getc "norm_num_groups") 32))
+        configured-layers (getc "layers_per_block")
+        layers-per-block (if (sequential? configured-layers)
+                           (long (first configured-layers))
+                           (long configured-layers))
+        scaling-factor (double (or (getc "scaling_factor") 0.18215))
+        up-types (vec (getc "up_block_types"))
+        initial [{:op :scale :factor (/ 1.0 scaling-factor)}
+                 {:op :conv2d :weight "post_quant_conv.weight"
+                  :bias "post_quant_conv.bias"}
+                 {:op :conv2d :weight "decoder.conv_in.weight"
+                  :bias "decoder.conv_in.bias" :padding 1}]
+        middle [(diffusers-vae-resblock names "decoder.mid_block.resnets.0." groups)
+                (diffusers-vae-attention names "decoder.mid_block.attentions.0." groups)
+                (diffusers-vae-resblock names "decoder.mid_block.resnets.1." groups)]
+        decoder
+        (vec
+         (mapcat
+          (fn [block]
+            (let [resnets (mapv #(diffusers-vae-resblock
+                                  names (str "decoder.up_blocks." block ".resnets." % ".")
+                                  groups)
+                                (range (inc layers-per-block)))
+                  upsample (when (< block (dec (count channels)))
+                             [{:op :upsample :scale-factor 2}
+                              {:op :conv2d
+                               :weight (str "decoder.up_blocks." block
+                                            ".upsamplers.0.conv.weight")
+                               :bias (str "decoder.up_blocks." block
+                                          ".upsamplers.0.conv.bias")
+                               :padding 1}])]
+              (concat resnets upsample)))
+          (range (count channels))))
+        final [{:op :groupnorm :groups groups
+                :weight "decoder.conv_norm_out.weight"
+                :bias "decoder.conv_norm_out.bias"}
+               {:op :silu}
+               {:op :conv2d :weight "decoder.conv_out.weight"
+                :bias "decoder.conv_out.bias" :padding 1}]
+        layers (vec (concat initial middle decoder final))
+        tensor-names (->> layers (mapcat vals) (filter string?))]
+    (when (and (= "AutoencoderKL" (getc "_class_name"))
+               (pos? scaling-factor) (seq channels)
+               (= (count channels) (count up-types))
+               (every? #(str/includes? % "UpDecoderBlock2D") up-types)
+               (every? some? layers) (every? names tensor-names))
+      {:architecture :diffusers-autoencoder-kl
+       :latent-channels (long (getc "latent_channels"))
+       :out-channels (long (getc "out_channels"))
+       :scaling-factor scaling-factor
+       :layers layers})))
