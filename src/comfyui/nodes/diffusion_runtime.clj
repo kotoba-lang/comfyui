@@ -390,19 +390,11 @@
               (throw (ex-info "VAE lacks executable checkpoint decoder"
                               {:vae-keys (keys vae)})))
             (let [decoded (decode latent)
-                  [batch channels height width :as shape] (:shape decoded)]
+                  [_batch channels _height _width :as shape] (:shape decoded)]
               (when-not (and (= 4 (count shape)) (= 3 channels))
                 (throw (ex-info "VAE decoder must return NCHW RGB"
                                 {:shape shape})))
-              (let [nhwc (t/transpose decoded [0 2 3 1])
-                    normalized
-                    (arr/from-vec
-                     (:backend nhwc)
-                     (mapv (fn [value]
-                             (max 0.0 (min 1.0 (* 0.5 (+ 1.0 value)))))
-                           (arr/->vec nhwc))
-                     [batch height width channels])]
-                [normalized]))))}
+              [(t/nchw-to-rgb-image decoded)])))}
    {:type "VAEEncode"
     :category "latent"
     :inputs {:pixels {:type "IMAGE"}
@@ -414,12 +406,7 @@
             (when-not (and (fn? encode) (= 4 (count shape)) (= 3 channels))
               (throw (ex-info "VAEEncode requires executable VAE and NHWC RGB pixels"
                               {:shape shape :vae-keys (keys vae)})))
-            (let [normalized
-                  (arr/from-vec
-                   (:backend pixels)
-                   (mapv #(- (* 2.0 %) 1.0) (arr/->vec pixels))
-                   shape)
-                  nchw (t/transpose normalized [0 3 1 2])
+            (let [nchw (t/rgb-image-to-nchw pixels)
                   latent (encode nchw)]
               (when-not (and (= 4 (count (:shape latent)))
                              (= batch (first (:shape latent))))

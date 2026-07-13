@@ -156,8 +156,11 @@ execution while retaining the upstream class names and wire types:
   `KSampler`; `VAEDecode` performs the inverse latent-to-image path. Encoder
   downsampling reproduces Diffusers' asymmetric right/bottom zero padding
   before its stride-2 convolution. On an `ITensorBackend`, padding and posterior
-  channel selection dispatch device-native kernels with no intermediate readback;
-  `vae-encoder-metal-verify` checks the graph against the CPU oracle on Apple Metal.
+  channel selection dispatch device-native kernels with no intermediate readback.
+  The node-boundary NHWC↔NCHW layout and `[0,1]`↔`[-1,1]` range conversions are
+  likewise fused into one Metal kernel instead of downloading every pixel;
+  `vae-encoder-metal-verify` checks both directions and the encoder graph against
+  the CPU oracle on Apple Metal.
 
 ```clojure
 (require '[comfyui.node :as node]
@@ -260,8 +263,8 @@ automatic denoiser instead of installing a partial graph.
 The same graph compiler now builds checkpoint-backed VAE decoders whose output
 may change spatial/channel dimensions. `VAEDecode` performs latent scaling and
 decoder conv/normalization/upsampling, converts NCHW RGB from `[-1,1]` to
-clamped NHWC `[0,1]`, and `SaveImage` writes each batch item through the JVM PNG
-codec. The end-to-end runtime fixture executes
+clamped NHWC `[0,1]` in one device-native kernel, and `SaveImage` writes each
+batch item through the JVM PNG codec. The end-to-end runtime fixture executes
 `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`, produces a real
 32×32 PNG, and verifies its signature and output metadata.
 
