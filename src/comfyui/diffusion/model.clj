@@ -13,7 +13,7 @@
 
 (def ^:private supported-ops
   #{:conv2d :groupnorm :silu :save :add-saved :cat-saved :upsample
-    :add-conditioning :timestep-bias})
+    :add-conditioning :cross-attention :timestep-bias :timestep-embedding})
 
 (defn- fail [message data]
   (throw (ex-info (str "comfyui.diffusion.model: " message) data)))
@@ -24,6 +24,76 @@
     (and (map? conditioning) (:samples conditioning)) (:samples conditioning)
     (and (map? conditioning) (:shape conditioning) (:backend conditioning)) conditioning
     :else nil))
+
+(defn- linear [x weight bias]
+  (let [output (t/matmul x (t/transpose weight))]
+    (if bias (t/add output bias) output)))
+
+(defn- cross-attention
+  [value condition tensor! layer]
+  (let [[batch channels height width :as input-shape] (:shape value)
+        condition (conditioning-tensor condition)
+        _ (when-not (and (= 4 (count input-shape)) condition
+                         (= 3 (count (:shape condition)))
+                         (= batch (first (:shape condition))))
+            (fail "cross-attention requires NCHW and [N tokens context] conditioning"
+                  {:value input-shape :conditioning (:shape condition)}))
+        heads (long (:heads layer))
+        _ (when-not (and (pos? heads) (zero? (mod channels heads)))
+            (fail "attention heads must divide channels"
+                  {:channels channels :heads heads}))
+        sequence (* height width)
+        head-dim (quot channels heads)
+        x-sequence (t/reshape (t/transpose value [0 2 3 1])
+                              [batch sequence channels])
+        projection (fn [prefix source]
+                     (linear source (tensor! (get layer (keyword (str prefix "-weight"))))
+                             (tensor! (get layer (keyword (str prefix "-bias"))))))
+        q (projection "query" x-sequence)
+        k (projection "key" condition)
+        v (projection "value" condition)
+        tokens (second (:shape condition))
+        split (fn [tensor length]
+                (t/transpose (t/reshape tensor [batch length heads head-dim])
+                             [0 2 1 3]))
+        qh (split q sequence) kh (split k tokens) vh (split v tokens)
+        scores (t/matmul qh (t/transpose kh [0 1 3 2]))
+        scaled (nm/scal! (/ 1.0 (Math/sqrt head-dim)) scores)
+        probabilities (t/softmax scaled)
+        attended (t/matmul probabilities vh)
+        merged (t/reshape (t/transpose attended [0 2 1 3])
+                          [batch sequence channels])
+        projected (linear merged (tensor! (:output-weight layer))
+                          (tensor! (:output-bias layer)))
+        nchw (t/transpose (t/reshape projected [batch height width channels])
+                          [0 3 1 2])]
+    (if (false? (:residual layer)) nchw (nm/add value nchw))))
+
+(defn- timestep-embedding [value timestep tensor! layer]
+  (let [first-weight (tensor! (:first-weight layer))
+        first-bias (tensor! (:first-bias layer))
+        second-weight (tensor! (:second-weight layer))
+        second-bias (tensor! (:second-bias layer))
+        embedding-dim (long (second (:shape first-weight)))
+        half (quot embedding-dim 2)
+        _ (when-not (and (even? embedding-dim) (> half 1))
+            (fail "timestep embedding input dimension must be even and >= 4"
+                  {:dimension embedding-dim}))
+        frequencies (mapv #(Math/exp (* -1.0 (Math/log 10000.0)
+                                           (/ % (dec half))))
+                          (range half))
+        angles (mapv #(* (double timestep) %) frequencies)
+        embedding (arr/from-vec (:backend value)
+                                (into (mapv #(Math/sin %) angles)
+                                      (mapv #(Math/cos %) angles))
+                                [1 embedding-dim])
+        hidden (t/silu (linear embedding first-weight first-bias))
+        projected (linear hidden second-weight second-bias)
+        channels (second (:shape value))]
+    (when-not (= [1 channels] (:shape projected))
+      (fail "timestep projection must produce [1 C]"
+            {:projected (:shape projected) :channels channels}))
+    (t/add value (t/reshape projected [1 channels 1 1]))))
 
 (defn compile-denoiser
   "Compile `spec` into `(fn [sample timestep conditioning] epsilon)`.
@@ -104,6 +174,14 @@
                        (fail "conditioning shape mismatch"
                              {:value (:shape value) :conditioning (:shape condition)}))
                      (assoc state :value (nm/add value condition)))
+
+                   :cross-attention
+                   (assoc state :value
+                          (cross-attention value conditioning tensor! layer))
+
+                   :timestep-embedding
+                   (assoc state :value
+                          (timestep-embedding value timestep tensor! layer))
 
                    :timestep-bias
                    (let [bias (* (double (or (:scale layer) 1.0)) (double timestep))

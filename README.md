@@ -149,15 +149,17 @@ execution while retaining the upstream class names and wire types:
 `comfyui.diffusion.model` lowers a plain-data model spec into checkpoint-backed
 num operations. Its current vocabulary executes convolution/downsampling,
 GroupNorm, SiLU, saved residual add/concat, nearest upsampling, direct
-conditioning, and timestep bias. Weights are decoded/uploaded lazily on first
-use and cached thereafter. The runtime test writes a valid safetensors checkpoint
+conditioning, learned multi-head Q/K/V cross-attention, sinusoidal timestep
+embedding with a checkpoint-backed two-layer SiLU MLP, and timestep bias.
+NCHW features are lowered to `[N,spatial,channels]` attention sequences and
+restored after the learned output projection/residual. Weights are
+decoded/uploaded lazily on first use and cached thereafter. The runtime test writes a valid safetensors checkpoint
 with eight trained-parameter tensors, loads it through `CheckpointLoaderSimple`,
 runs a U-shaped down/middle/up/skip denoiser under positive and negative CFG,
 and completes two DDIM steps through the actual graph executor.
 
 This is not yet a complete SD/SDXL render: upstream architecture detection,
-sinusoidal timestep embeddings, learned QKV cross-attention with CLIP
-tokenization/encoding, full production UNet/DiT lowering, non-DDIM sampler
+CLIP tokenization/encoding, complete production block/config mapping, non-DDIM sampler
 families, VAE decode, image codec/save, mixed precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
