@@ -21,6 +21,8 @@ src/comfyui/
   std.cljc             standard node pack (primitives, math, text, Preview)
   viz.cljc             workflow → Mermaid
   nodes/langchain.cljc ChatModel / tool nodes bridging to langchain-clj
+  safetensors.clj     lazy, validated F16/BF16/F32 checkpoint reader
+  diffusion/          real noise schedules and DDIM latent transitions
 ```
 
 ## Design
@@ -112,6 +114,40 @@ the ComfyUI → comfyui-clj correspondence table (NODE_CLASS_MAPPINGS,
 API format, /object_info, /prompt + /queue + /history) and the
 engine/inference split rationale. License is GPL-3.0, matching
 upstream ComfyUI.
+
+## Executable diffusion foundation
+
+`comfyui.nodes.diffusion-runtime/pack` replaces three contracts with real JVM
+execution while retaining the upstream class names and wire types:
+
+- `CheckpointLoaderSimple` opens and validates a real safetensors file, keeps
+  tensor payloads lazy on disk, partitions MODEL/CLIP/VAE tensor catalogs by
+  checkpoint prefixes, and decodes requested F16, BF16, F32, F64, signed, or
+  unsigned tensors into `num` NDArrays.
+- `EmptyLatentImage` allocates `[batch,4,height/8,width/8]` NCHW latent storage.
+- `DDIMStep` performs the real epsilon-prediction transition, including the
+  deterministic path and eta/noise variance path, inside `comfyui.exec`.
+
+```clojure
+(require '[comfyui.node :as node]
+         '[comfyui.nodes.diffusion-runtime :as diffusion-runtime]
+         '[num.cpu :as cpu])
+
+(def reg
+  (node/registry
+   (diffusion-runtime/pack
+    {:backend (cpu/cpu-backend)
+     :resolve-checkpoint #(str "/models/checkpoints/" %)})))
+```
+
+The safetensors tests construct valid binary checkpoint payloads and prove
+window bounds plus F16/BF16/F32 decoding; runtime tests execute checkpoint
+loading, lazy tensor materialization, latent allocation, and DDIM through the
+actual graph executor. This is not yet a complete SD/SDXL render: CLIP
+tokenization/encoding, full trained UNet/DiT graph lowering, iterative KSampler,
+VAE decode, image codec/save, device-native NCHW kernels, and an installed real
+checkpoint for end-to-end image comparison remain required. Production image
+generation therefore still uses Python ComfyUI/PyTorch today.
 
 ## Tests / example
 

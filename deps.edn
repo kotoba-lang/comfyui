@@ -7,7 +7,8 @@
  ;; ...) reader conditionals) and left for consumers to bring themselves
  ;; (every current consumer already declares them for its own server needs)
  ;; -- see the :test alias for how this repo's own tests supply them.
- :deps {io.github.kotoba-lang/langchain
+ :deps {org.clojure/data.json {:mvn/version "2.5.1"}
+        io.github.kotoba-lang/langchain
         {:git/sha "c74e358c486bdbbed415261abe352ae73831bb8e"}}
  :aliases
  {:test {:extra-paths ["test"]
