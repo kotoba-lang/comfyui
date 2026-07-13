@@ -8,7 +8,9 @@
 
 (def values (mapv #(- (* 0.125 %) 0.75) (range 16)))
 (def spec {:layers []
-           :encoder-layers [{:op :pad-right-bottom}
+           :encoder-layers [{:op :groupnorm :groups 2}
+                            {:op :silu}
+                            {:op :pad-right-bottom}
                             {:op :take-channels :channels 2}
                             {:op :scale :factor 0.5}]})
 (def component

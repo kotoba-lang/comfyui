@@ -12,7 +12,7 @@
             [num.tensor :as t]))
 
 (def ^:private supported-ops
-  #{:conv2d :groupnorm :silu :save :add-saved :cat-saved :upsample
+  #{:conv2d :groupnorm :groupnorm-silu :silu :save :add-saved :cat-saved :upsample
     :scale :pad-right-bottom :take-channels :add-conditioning :cross-attention :timestep-bias :timestep-embedding
     :timestep-vector :sdxl-label-embedding :add-embedding :resblock
     :spatial-transformer :vae-attention})
@@ -110,35 +110,40 @@
 (defn- resblock [value embedding tensor! layer]
   (let [groups (or (:groups layer) 32)
         residual value
-        hidden (-> value
-                   (t/group-norm-nchw groups
-                                      (tensor! (:in-norm-weight layer))
-                                      (tensor! (:in-norm-bias layer)) 1.0e-5)
-                   t/silu
-                   (t/conv2d-nchw (tensor! (:in-conv-weight layer))
-                                  (tensor! (:in-conv-bias layer))
-                                  {:padding 1}))
+        normalized-in (t/group-norm-silu-nchw
+                       value groups (tensor! (:in-norm-weight layer))
+                       (tensor! (:in-norm-bias layer)) 1.0e-5)
+        hidden-in (t/conv2d-nchw normalized-in
+                                 (tensor! (:in-conv-weight layer))
+                                 (tensor! (:in-conv-bias layer)) {:padding 1})
+        _ (arr/release! normalized-in)
         hidden (if (:embedding-weight layer)
-                 (add-embedding hidden embedding tensor!
-                                {:weight (:embedding-weight layer)
-                                 :bias (:embedding-bias layer)})
-                 hidden)
-        hidden (-> hidden
-                   (t/group-norm-nchw groups
-                                      (tensor! (:out-norm-weight layer))
-                                      (tensor! (:out-norm-bias layer)) 1.0e-5)
-                   t/silu
-                   (t/conv2d-nchw (tensor! (:out-conv-weight layer))
-                                  (tensor! (:out-conv-bias layer))
-                                  {:padding 1}))
+                 (let [conditioned
+                       (add-embedding hidden-in embedding tensor!
+                                      {:weight (:embedding-weight layer)
+                                       :bias (:embedding-bias layer)})]
+                   (arr/release! hidden-in)
+                   conditioned)
+                 hidden-in)
+        normalized-out (t/group-norm-silu-nchw
+                        hidden groups (tensor! (:out-norm-weight layer))
+                        (tensor! (:out-norm-bias layer)) 1.0e-5)
+        hidden-out (t/conv2d-nchw normalized-out
+                                  (tensor! (:out-conv-weight layer))
+                                  (tensor! (:out-conv-bias layer)) {:padding 1})
+        _ (arr/release! normalized-out)
+        _ (arr/release! hidden)
         residual (if (:skip-weight layer)
                    (t/conv2d-nchw residual (tensor! (:skip-weight layer))
                                   (tensor! (:skip-bias layer)))
                    residual)]
-    (when-not (= (:shape hidden) (:shape residual))
+    (when-not (= (:shape hidden-out) (:shape residual))
       (fail "ResBlock hidden/skip shapes differ"
-            {:hidden (:shape hidden) :skip (:shape residual)}))
-    (nm/add residual hidden)))
+            {:hidden (:shape hidden-out) :skip (:shape residual)}))
+    (let [output (nm/add residual hidden-out)]
+      (arr/release! hidden-out)
+      (when (:skip-weight layer) (arr/release! residual))
+      output)))
 
 (defn- layer-norm [x weight bias eps]
   (let [shape (:shape x) hidden (long (last shape))
@@ -382,6 +387,15 @@
 (defn- same-handle? [a b]
   (and a b (identical? (:handle a) (:handle b))))
 
+(defn- fuse-execution-layers [layers]
+  (loop [remaining layers output []]
+    (if-let [layer (first remaining)]
+      (if (and (= :groupnorm (:op layer))
+               (= :silu (:op (second remaining))))
+        (recur (nnext remaining) (conj output (assoc layer :op :groupnorm-silu)))
+        (recur (next remaining) (conj output layer)))
+      (vec output))))
+
 (defn- compile-graph
   [component backend {:keys [layers] :as spec} same-shape?]
   (when-not (and backend (fn? (:comfyui/read-tensor component))
@@ -394,6 +408,7 @@
                                      :supported supported-ops})))
   (validate-saved-liveness! layers)
   (let [cache (atom {})
+        execution-layers (fuse-execution-layers layers)
         initial-saved-uses (saved-use-counts layers)
         tensor! (fn [tensor-name]
                   (when tensor-name
@@ -425,6 +440,12 @@
                                              (tensor! (:weight layer))
                                              (tensor! (:bias layer))
                                              (or (:eps layer) 1.0e-5)))
+
+                   :groupnorm-silu
+                   (assoc state :value
+                          (t/group-norm-silu-nchw
+                           value (:groups layer) (tensor! (:weight layer))
+                           (tensor! (:bias layer)) (or (:eps layer) 1.0e-5)))
 
                    :silu (assoc state :value (t/silu value))
 
@@ -534,7 +555,7 @@
                                       (some #(same-handle? candidate %) protected)))
                                 candidates))))
                    next-state))
-               initial layers)
+               initial execution-layers)
               output (:value result)]
           (when (:release-intermediates? spec)
             (arr/release-all!

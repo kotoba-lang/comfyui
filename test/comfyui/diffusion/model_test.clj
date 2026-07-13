@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [comfyui.diffusion.model :as model]
             [num.array :as arr]
-            [num.cpu :as cpu]))
+            [num.cpu :as cpu]
+            [num.tensor :as t]))
 
 (def backend (cpu/cpu-backend))
 
@@ -85,6 +86,20 @@
                   component backend
                   {:layers [{:op :save :name :same}
                             {:op :save :name :same}]})))))
+
+(deftest adjacent-groupnorm-and-silu-compile-to-one-fused-op
+  (let [calls (atom 0)
+        input (arr/from-vec backend [1.0 3.0] [1 2 1 1])]
+    (with-redefs [t/group-norm-silu-nchw
+                  (fn [value _groups _weight _bias _eps]
+                    (swap! calls inc) value)
+                  t/silu (fn [_] (throw (ex-info "unfused SiLU called" {})))]
+      (let [decode (model/compile-decoder
+                    {:comfyui/read-tensor (fn [_ _] nil)} backend
+                    {:layers [{:op :groupnorm :groups 1}
+                              {:op :silu}]})]
+        (is (identical? (:handle input) (:handle (decode input))))
+        (is (= 1 @calls))))))
 
 (deftest vae-spatial-self-attention-executes-and-caches
   (let [identity (arr/from-vec backend (identity-values 2 2 1.0) [2 2])
