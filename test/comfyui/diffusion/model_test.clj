@@ -56,6 +56,36 @@
         (is (not-any? #(identical? (:handle input) (:handle %)) @released))
         (is (not-any? #(identical? (:handle output) (:handle %)) @released))))))
 
+(deftest denoiser-releases-skip-at-last-use-and-protects-callers
+  (let [released (atom [])
+        input (arr/from-vec backend [1.0 2.0] [1 2])
+        denoise (model/compile-denoiser
+                 {:comfyui/read-tensor
+                  (fn [_ name] (throw (ex-info "unexpected tensor" {:name name})))}
+                 backend
+                 {:layers [{:op :save :name :skip}
+                           {:op :scale :factor 2.0}
+                           {:op :add-saved :name :skip}
+                           {:op :scale :factor 0.5}]})]
+    (with-redefs [arr/release! (fn [value] (swap! released conj value) nil)]
+      (let [output (denoise input 0 nil)]
+        (is (= [1.5 3.0] (arr/->vec output)))
+        (is (= 2 (count @released)))
+        (is (not-any? #(identical? (:handle input) (:handle %)) @released))
+        (is (not-any? #(identical? (:handle output) (:handle %)) @released))))))
+
+(deftest saved-liveness-rejects-ambiguous-graphs
+  (let [component {:comfyui/read-tensor (fn [_ _] nil)}]
+    (is (thrown? Exception
+                 (model/compile-denoiser
+                  component backend
+                  {:layers [{:op :add-saved :name :missing}]})))
+    (is (thrown? Exception
+                 (model/compile-denoiser
+                  component backend
+                  {:layers [{:op :save :name :same}
+                            {:op :save :name :same}]})))))
+
 (deftest vae-spatial-self-attention-executes-and-caches
   (let [identity (arr/from-vec backend (identity-values 2 2 1.0) [2 2])
         zeros (arr/from-vec backend [0 0] [2])

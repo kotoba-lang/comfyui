@@ -19,27 +19,51 @@
   ((model/compile-encoder component backend spec)
    (arr/from-vec backend values [1 4 2 2])))
 
+(def denoiser-spec
+  {:layers [{:op :scale :factor 2.0}
+            {:op :save :name :skip}
+            {:op :scale :factor 3.0}
+            {:op :add-saved :name :skip}
+            {:op :scale :factor 0.25}]})
+
+(defn- denoise [backend]
+  ((model/compile-denoiser component backend denoiser-spec)
+   (arr/from-vec backend [1.0 -2.0 3.0 -4.0] [1 4]) 0 nil))
+
 (defn -main [& _]
-  (let [expected-output (compile-and-run (cpu/cpu-backend))
-        expected (arr/->vec expected-output)]
+  (let [cpu-backend (cpu/cpu-backend)
+        expected-output (compile-and-run cpu-backend)
+        expected (arr/->vec expected-output)
+        expected-denoise (arr/->vec (denoise cpu-backend))]
     (-> (dg/request-device)
         (.then
          (fn [request]
            (let [gpu (dg/backend request)
                  output (compile-and-run gpu)]
-             (-> (arr/->vec output)
-                 (.then
-                  (fn [actual]
-                    (when-not (and (= [1 2 3 3] (:shape output))
-                                   (= (count expected) (count actual))
-                                   (every? true?
-                                           (map #(< (Math/abs (- %1 %2)) 1.0e-6)
-                                                expected actual)))
-                      (throw (ex-info "Metal VAE encoder graph differs from CPU"
-                                      {:shape (:shape output)
-                                       :expected expected :actual actual})))
-                    (println "OK VAE encoder graph: asymmetric pad + channel slice + scale"
-                             "match CPU on" (dg/adapter-description request))))))))
+             (.then
+              (js/Promise.all
+               #js [(arr/->vec output) (arr/->vec (denoise gpu))])
+              (fn [results]
+                (let [actual (aget results 0)
+                      actual-denoise (aget results 1)]
+                  (when-not
+                      (and (= [1 2 3 3] (:shape output))
+                           (= (count expected) (count actual))
+                           (every? true?
+                                   (map #(< (Math/abs (- %1 %2)) 1.0e-6)
+                                        expected actual))
+                           (every? true?
+                                   (map #(< (Math/abs (- %1 %2)) 1.0e-6)
+                                        expected-denoise actual-denoise)))
+                    (throw
+                     (ex-info "Metal liveness graphs differ from CPU"
+                              {:shape (:shape output)
+                               :expected expected :actual actual
+                               :expected-denoise expected-denoise
+                               :actual-denoise actual-denoise})))
+                  (println "OK VAE + saved-skip liveness graphs match CPU with"
+                           "GPUBuffer.destroy on"
+                           (dg/adapter-description request))))))))
         (.catch
          (fn [error]
            (println "ERROR:" (or (.-stack error) (str error)))

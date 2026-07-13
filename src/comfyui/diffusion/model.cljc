@@ -352,6 +352,36 @@
             {:projected (:shape projected) :channels channels}))
     (t/add value (t/reshape projected [1 channels 1 1]))))
 
+(defn- saved-use-counts [layers]
+  (frequencies
+   (keep (fn [layer]
+           (when (#{:add-saved :cat-saved} (:op layer)) (:name layer)))
+         layers)))
+
+(defn- validate-saved-liveness! [layers]
+  (loop [remaining layers saved #{}]
+    (when-let [layer (first remaining)]
+      (let [op (:op layer) name (:name layer)]
+        (cond
+          (= :save op)
+          (do
+            (when (or (nil? name) (contains? saved name))
+              (fail "saved tensor names must be non-nil and unique"
+                    {:name name :layer layer}))
+            (recur (next remaining) (conj saved name)))
+
+          (#{:add-saved :cat-saved} op)
+          (do
+            (when-not (contains? saved name)
+              (fail "saved tensor must be defined before use"
+                    {:name name :layer layer}))
+            (recur (next remaining) saved))
+
+          :else (recur (next remaining) saved))))))
+
+(defn- same-handle? [a b]
+  (and a b (identical? (:handle a) (:handle b))))
+
 (defn- compile-graph
   [component backend {:keys [layers] :as spec} same-shape?]
   (when-not (and backend (fn? (:comfyui/read-tensor component))
@@ -362,7 +392,9 @@
     (when-not (contains? supported-ops (:op layer))
       (fail "unsupported model op" {:index index :layer layer
                                      :supported supported-ops})))
+  (validate-saved-liveness! layers)
   (let [cache (atom {})
+        initial-saved-uses (saved-use-counts layers)
         tensor! (fn [tensor-name]
                   (when tensor-name
                     (or (get @cache tensor-name)
@@ -371,10 +403,11 @@
                           tensor))))]
     (with-meta
       (fn [sample timestep conditioning]
-        (let [initial {:value sample :saved {} :embedding nil}
+        (let [initial {:value sample :saved {} :embedding nil
+                       :saved-uses initial-saved-uses}
               result
               (reduce
-               (fn [{:keys [value saved] :as state} layer]
+               (fn [{:keys [value saved embedding saved-uses] :as state} layer]
                  (let [next-state
                        (case (:op layer)
                    :conv2d
@@ -474,17 +507,41 @@
                    :timestep-bias
                    (let [bias (* (double (or (:scale layer) 1.0)) (double timestep))
                          scalar (arr/from-vec (:backend value) [bias] [])]
-                     (assoc state :value (t/add value scalar))))]
-                   (when (and (:release-intermediates? spec)
-                              (not (identical? (:handle value) (:handle sample)))
-                              (not (identical? (:handle value)
-                                               (:handle (:value next-state))))
-                              (not-any? #(identical? (:handle value) (:handle %))
-                                        (vals saved)))
-                     (arr/release! value))
+                     (assoc state :value (t/add value scalar))))
+                       consumed-name (when (#{:add-saved :cat-saved} (:op layer))
+                                       (:name layer))
+                       uses-left (when consumed-name
+                                   (dec (long (get saved-uses consumed-name))))
+                       consumed (when (and consumed-name (zero? uses-left))
+                                  (get saved consumed-name))
+                       next-state (cond-> next-state
+                                    consumed-name
+                                    (assoc-in [:saved-uses consumed-name] uses-left)
+                                    (and consumed-name (zero? uses-left))
+                                    (update :saved dissoc consumed-name))]
+                   (when (:release-intermediates? spec)
+                     (let [protected (concat [sample (:value next-state)
+                                              (:embedding next-state)]
+                                             (vals (:saved next-state)))
+                           candidates (cond-> [value consumed]
+                                        (and embedding
+                                             (not (same-handle?
+                                                   embedding (:embedding next-state))))
+                                        (conj embedding))]
+                       (arr/release-all!
+                        (remove (fn [candidate]
+                                  (or (nil? candidate)
+                                      (some #(same-handle? candidate %) protected)))
+                                candidates))))
                    next-state))
                initial layers)
               output (:value result)]
+          (when (:release-intermediates? spec)
+            (arr/release-all!
+             (remove (fn [candidate]
+                       (or (same-handle? candidate sample)
+                           (same-handle? candidate output)))
+                     (concat (vals (:saved result)) [(:embedding result)]))))
           (when (and same-shape? (not= (:shape sample) (:shape output)))
             (fail "epsilon output shape must equal sample shape"
                   {:sample (:shape sample) :output (:shape output)}))
@@ -498,7 +555,7 @@
   `:comfyui/read-tensor`; weights are read lazily on `backend`. Output shape is
   required to equal sample shape, matching epsilon-prediction KSampler models."
   [component backend spec]
-  (compile-graph component backend spec true))
+  (compile-graph component backend (assoc spec :release-intermediates? true) true))
 
 (defn compile-decoder
   "Compile a checkpoint-backed graph into `(fn [latent] image)`. Unlike a

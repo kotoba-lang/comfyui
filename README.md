@@ -188,6 +188,11 @@ MODEL/CLIP/VAE outputs when unloading a workflow. It deduplicates shared caches,
 destroys cached GPU tensors, clears the caches, and closes each shared
 safetensors mapping once. VAE encoder/decoder graphs also release replaced
 intermediate tensors between layers while preserving caller inputs and outputs.
+UNet graphs validate unique `:save` names and require every skip use to follow
+its definition. The compiler counts `:add-saved`/`:cat-saved` consumers, keeps a
+skip alive across every consumer, and destroys it immediately after its last use.
+Remaining saved values and timestep embeddings are released when the graph
+returns; caller inputs, cached weights, conditioning, and output remain owned.
 
 `comfyui.diffusion.architecture` inspects tensor names/shapes without decoding
 payloads and identifies SD1 (768 context), SD2 (1024), SDXL base (label
