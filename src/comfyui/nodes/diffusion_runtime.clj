@@ -386,8 +386,7 @@
                 initial-noise (noise-fn (:shape sample) initial-timestep)
                 initial-sample
                 (case sampler_name
-                  "ddim" (scheduler/add-noise
-                          sample initial-noise (nth alphas initial-timestep))
+                  "ddim" (t/add sample initial-noise)
                   (let [sigma (scheduler/alpha->sigma
                                (double (nth alphas initial-timestep)))]
                     (t/add sample (nm/scal! sigma initial-noise))))

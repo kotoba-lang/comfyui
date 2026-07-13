@@ -267,6 +267,13 @@ configuration. Multi-step sampling likewise preserves `linspace`, `leading`,
 or `trailing` timestep spacing, `steps_offset`, and `set_alpha_to_one` rather
 than silently substituting a generic schedule.
 
+The pipeline verifier additionally runs a fixed-noise, two-step `[501, 1]`
+DDIM trajectory through positive/negative CFG and the VAE. Against the same
+PyTorch/Diffusers trajectory, guided epsilon sums agree within `1e-4`, final
+latent and image sums within `1e-3`, and sampled output pixels within `1e-4`.
+Full-denoise DDIM begins from the seeded noise tensor (`init_noise_sigma=1`),
+while Euler retains sigma-scaled initialization.
+
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
 upstream Diffusers, and additional

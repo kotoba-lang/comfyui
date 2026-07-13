@@ -148,7 +148,8 @@
                     (noise-fn (:shape current) timestep))
             step (ddim-step current epsilon alpha alpha-prev {:eta eta :noise noise})
             event {:timestep timestep :alpha alpha :alpha-prev alpha-prev
-                   :sigma (:sigma step)}]
+                   :sigma (:sigma step) :epsilon epsilon
+                   :sample (:previous-sample step)}]
         (when on-step (on-step event))
         (recur (:previous-sample step) (next remaining) (conj history event)))
       {:sample current :history history})))
