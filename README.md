@@ -240,9 +240,32 @@ and no encoder tensor is touched:
 clojure -M:real-diffusers-vae-verify vae.safetensors vae/config.json
 ```
 
-This is not yet a verified production SD/SDXL render: the complete automatic
-UNet mapping still needs full-size validation against installed upstream
-checkpoints, and additional
+`DiffusersPipelineLoader` loads the upstream directory layout without first
+repacking it into a monolithic checkpoint: standalone UNet, Transformers
+`CLIPTextModel`, VAE, and scheduler configs are validated and compiled as one
+ComfyUI-compatible MODEL/CLIP/VAE triple. Configured small CLIP head counts and
+Hugging Face EOS padding are preserved. `KSampler` now creates reproducible
+seeded initial noise (DDIM alpha-space or Euler sigma-space) instead of treating
+`EmptyLatentImage`'s zeros as the starting noisy latent. The full real-file
+verifier executes prompt tokenization, positive/negative CLIP conditioning,
+CFG UNet sampling, VAE decoding, and PNG output:
+
+```sh
+clojure -M:real-diffusers-pipeline-verify \
+  unet/model.safetensors unet/config.json \
+  text_encoder/model.safetensors text_encoder/config.json \
+  vae/model.safetensors vae/config.json scheduler/scheduler_config.json \
+  tokenizer/vocab.json tokenizer/merges.txt
+```
+
+The real verifiers also pin numerical reference values produced from the same
+inputs by PyTorch 2.13, Diffusers 0.39, and Transformers 5.13. CLIP's first
+hidden-state values agree within `1e-5`; VAE pixels agree within `1e-4` with a
+total image-sum error below `1e-2`.
+
+This is not yet a verified production SD/SDXL render: the automatic graph
+mapping still needs full-size validation and pixel/numerical comparison against
+upstream Diffusers, and additional
 ancestral/DPM sampler families, additional VAE variants, mixed precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.

@@ -29,4 +29,8 @@
   (let [encode (clip/tokenizer encoder merges {:context-length 5})
         result (encode "hello hello hello hello")]
     (is (= [49406 100 100 100 49407] (:input-ids result)))
-    (is (:truncated? result))))
+    (is (:truncated? result)))
+  (let [encode (clip/tokenizer encoder merges
+                               {:context-length 6 :pad-token "<|endoftext|>"})]
+    (is (= [49406 100 49407 49407 49407 49407]
+           (:input-ids (encode "hello"))))))

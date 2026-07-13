@@ -53,15 +53,17 @@
   "Build a tokenizer from an encoder token->id map and ordered merge pairs.
   Options default to OpenAI CLIP's special tokens and context length 77."
   ([encoder merges] (tokenizer encoder merges {}))
-  ([encoder merges {:keys [start-token end-token context-length]
+  ([encoder merges {:keys [start-token end-token pad-token context-length]
                     :or {start-token "<|startoftext|>"
                          end-token "<|endoftext|>" context-length 77}}]
    (let [merge-ranks (into {} (map-indexed (fn [rank pair] [pair rank]) merges))
          bytes (byte-encoder)
          cache (atom {})
          start-id (get encoder start-token)
-         end-id (get encoder end-token)]
+         end-id (get encoder end-token)
+         pad-id (if pad-token (get encoder pad-token) 0)]
      (when-not (and (integer? start-id) (integer? end-id)
+                    (integer? pad-id)
                     (pos-int? context-length))
        (throw (ex-info "CLIP vocabulary lacks special tokens or context is invalid"
                        {:start-token start-token :end-token end-token
@@ -88,7 +90,7 @@
              content (subvec ids 0 (min content-limit (count ids)))
              unpadded (into [start-id] (conj content end-id))
              padding (- context-length (count unpadded))]
-         {:input-ids (into unpadded (repeat padding 0))
+         {:input-ids (into unpadded (repeat padding pad-id))
           :attention-mask (into (vec (repeat (count unpadded) 1))
                                 (repeat padding 0))
           :truncated? (> (count ids) content-limit)})))))

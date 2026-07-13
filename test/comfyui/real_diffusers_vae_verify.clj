@@ -28,6 +28,14 @@
             started (System/nanoTime)
             [image] ((:fn vae-decode) {:samples latent :vae vae})
             values (arr/->vec image)
+            reference-first8 [0.4374271631240845 0.3919304311275482
+                              0.4134933352470398 0.42122697830200195
+                              0.47406381368637085 0.499450147151947
+                              0.5006544589996338 0.45798537135124207]
+            reference-max-error (apply max (map #(Math/abs (- %1 %2))
+                                                 (take 8 values) reference-first8))
+            reference-sum-error (Math/abs (- (reduce + values)
+                                             392.2850646972656))
             cache @(-> (:comfyui/decode vae) meta :comfyui/tensor-cache)
             report {:architecture (get-in vae [:comfyui/model-spec :architecture])
                     :checkpoint-tensors (count (safe/tensor-names
@@ -39,13 +47,19 @@
                     :shape (:shape image)
                     :finite (every? #(Double/isFinite (double %)) values)
                     :range [(apply min values) (apply max values)]
+                    :sum (reduce + values)
+                    :first8 (vec (take 8 values))
+                    :reference-max-error reference-max-error
+                    :reference-sum-error reference-sum-error
                     :seconds (/ (- (System/nanoTime) started) 1.0e9)}]
         (println (pr-str report))
         (when-not (and (= :diffusers-autoencoder-kl (:architecture report))
                        (= [1 16 16 3] (:shape report)) (:finite report)
                        (every? #(<= 0.0 % 1.0) values)
                        (pos? (:loaded-tensors report))
-                       (zero? (:encoder-tensors-loaded report)))
+                       (zero? (:encoder-tensors-loaded report))
+                       (< reference-max-error 1.0e-4)
+                       (< reference-sum-error 1.0e-2))
           (throw (ex-info "real Diffusers VAE verification failed" report))))
       (finally
         (safe/close! (:comfyui/checkpoint vae))))))

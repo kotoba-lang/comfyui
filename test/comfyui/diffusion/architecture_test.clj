@@ -96,6 +96,18 @@
     (is (= [12 20] (mapv :heads (:encoders spec))))
     (is (= 2 (count (:encoders spec))))))
 
+(deftest infers-small-standalone-diffusers-clip-from-config
+  (let [checkpoint* {:tensors (hf-clip-tensors "text_model." 32)}
+        config {"architectures" ["CLIPTextModel"] "model_type" "clip_text_model"
+                "hidden_size" 32 "num_attention_heads" 4 "num_hidden_layers" 1
+                "layer_norm_eps" 1.0e-5}
+        spec (architecture/infer-diffusers-clip-spec checkpoint* config)]
+    (is (= :diffusers-hf (:format spec)))
+    (is (= 4 (:heads spec)))
+    (is (= 32 (:hidden spec)))
+    (is (nil? (architecture/infer-diffusers-clip-spec
+               checkpoint* (assoc config "num_attention_heads" 3))))))
+
 (defn- openclip-tensors [root hidden]
   (let [layer (str root "transformer.resblocks.0.")
         suffixes ["ln_1.weight" "ln_1.bias" "attn.in_proj_weight"

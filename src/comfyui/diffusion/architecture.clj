@@ -327,7 +327,9 @@
           {:architecture (:family architecture-info)
            :layers (vec (concat conditioning encoder middle decoder final-layers))})))))
 
-(defn- infer-hf-clip-spec [checkpoint names root]
+(defn- infer-hf-clip-spec
+  ([checkpoint names root] (infer-hf-clip-spec checkpoint names root nil))
+  ([checkpoint names root configured-heads]
     (let [token-name (str root "embeddings.token_embedding.weight")
           position-name (str root "embeddings.position_embedding.weight")
           layer-pattern (when root
@@ -341,8 +343,12 @@
                                sort vec))
           contiguous? (= layer-indices (vec (range (count layer-indices))))
           hidden (second (shape-at checkpoint token-name))
-          heads (when (and hidden (zero? (mod (long hidden) 64)))
-                  (quot (long hidden) 64))
+          heads (if configured-heads
+                  (when (and hidden (pos-int? configured-heads)
+                             (zero? (mod (long hidden) (long configured-heads))))
+                    (long configured-heads))
+                  (when (and hidden (zero? (mod (long hidden) 64)))
+                    (quot (long hidden) 64)))
           layer-spec
           (fn [index]
             (let [base (str root "encoder.layers." index ".")]
@@ -372,7 +378,23 @@
         {:token-embedding token-name :position-embedding position-name
          :layers layers :heads heads :hidden hidden :format :hf
          :final-norm-weight final-weight :final-norm-bias final-bias
-         :eps 1.0e-5})))
+         :eps 1.0e-5}))))
+
+(defn infer-diffusers-clip-spec
+  "Infer a standalone Transformers CLIPTextModel using its config.json for
+  head count and numerical parameters that cannot be recovered from shapes."
+  [checkpoint config]
+  (let [getc #(or (get config %) (get config (keyword %)))
+        architectures (set (getc "architectures"))
+        names (set (safe/tensor-names checkpoint))
+        spec (infer-hf-clip-spec checkpoint names "text_model."
+                                   (long (getc "num_attention_heads")))]
+    (when (and spec (or (architectures "CLIPTextModel")
+               (= "clip_text_model" (getc "model_type")))
+               (= (:hidden spec) (long (getc "hidden_size")))
+               (= (count (:layers spec)) (long (getc "num_hidden_layers"))))
+      (assoc spec :eps (double (or (getc "layer_norm_eps") 1.0e-5))
+                  :format :diffusers-hf))))
 
 (defn- infer-openclip-spec [checkpoint names root]
   (let [token-name (str root "token_embedding.weight")
