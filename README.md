@@ -200,6 +200,11 @@ Adjacent graph-level `GroupNorm → SiLU` layers are compiled into num's fused
 Metal kernel. Diffusers ResBlocks use the same primitive internally and release
 their normalization, convolution, and projected-skip temporaries as soon as each
 dependent dispatch has been submitted.
+SpatialTransformer blocks also remain device-native on Metal: last-axis
+LayerNorm, GEGLU slicing/GELU/gating, rank-3/4 axis permutations, broadcast
+batched matmul, and fused self/cross multi-head attention no longer materialize
+host vectors. The Metal verifier executes a complete self-attention →
+cross-attention → GEGLU block and compares its output with the CPU oracle.
 
 `comfyui.diffusion.architecture` inspects tensor names/shapes without decoding
 payloads and identifies SD1 (768 context), SD2 (1024), SDXL base (label

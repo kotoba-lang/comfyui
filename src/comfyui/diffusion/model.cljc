@@ -146,54 +146,20 @@
       output)))
 
 (defn- layer-norm [x weight bias eps]
-  (let [shape (:shape x) hidden (long (last shape))
-        rows (quot (arr/nelems shape) hidden)
-        xs (double-array (arr/->vec x))
-        ws (double-array (arr/->vec weight))
-        bs (double-array (arr/->vec bias))
-        out (double-array (arr/nelems shape))]
-    (dotimes [row rows]
-      (let [base (* row hidden)
-            mean (/ (loop [i 0 sum 0.0]
-                      (if (< i hidden) (recur (inc i) (+ sum (aget xs (+ base i)))) sum))
-                    hidden)
-            variance (/ (loop [i 0 sum 0.0]
-                          (if (< i hidden)
-                            (let [delta (- (aget xs (+ base i)) mean)]
-                              (recur (inc i) (+ sum (* delta delta)))) sum))
-                        hidden)
-            inv-std (/ 1.0 (Math/sqrt (+ variance eps)))]
-        (dotimes [i hidden]
-          (aset out (+ base i)
-                (+ (* (- (aget xs (+ base i)) mean) inv-std (aget ws i))
-                   (aget bs i))))))
-    (arr/from-vec (:backend x) (vec out) shape)))
+  (t/layer-norm-last x weight bias eps))
 
 (defn- sequence-attention [query context tensor! spec heads]
-  (let [[batch query-length hidden] (:shape query)
-        context-length (second (:shape context))
-        head-dim (quot hidden heads)
-        projection (fn [source weight-key bias-key]
+  (let [projection (fn [source weight-key bias-key]
                      (linear source (tensor! (get spec weight-key))
                              (tensor! (get spec bias-key))))
-        split (fn [value length]
-                (t/transpose (t/reshape value [batch length heads head-dim])
-                             [0 2 1 3]))
-        q (split (projection query :query-weight :query-bias) query-length)
-        k (split (projection context :key-weight :key-bias) context-length)
-        v (split (projection context :value-weight :value-bias) context-length)
-        scores (nm/scal! (/ 1.0 (Math/sqrt head-dim))
-                         (t/matmul q (t/transpose k [0 1 3 2])))
-        probabilities (t/softmax scores)
-        attended (t/matmul probabilities v)
-        merged (t/reshape (t/transpose attended [0 2 1 3])
-                          [batch query-length hidden])]
-    (linear merged (tensor! (:output-weight spec)) (tensor! (:output-bias spec)))))
-
-(defn- gelu [value]
-  (* 0.5 value
-     (+ 1.0 (Math/tanh (* 0.7978845608
-                     (+ value (* 0.044715 value value value)))))))
+        q (projection query :query-weight :query-bias)
+        k (projection context :key-weight :key-bias)
+        v (projection context :value-weight :value-bias)
+        attended (t/multi-head-attention q k v heads)
+        output (linear attended (tensor! (:output-weight spec))
+                       (tensor! (:output-bias spec)))]
+    (doseq [temporary [q k v attended]] (arr/release! temporary))
+    output))
 
 (defn- geglu [x tensor! spec]
   (let [projected (linear x (tensor! (:project-weight spec))
@@ -201,21 +167,16 @@
         shape (:shape projected)
         doubled (last shape)
         inner (quot doubled 2)
-        rows (quot (arr/nelems shape) doubled)
-        values (vec (arr/->vec projected))
-        gated (vec
-               (mapcat
-                (fn [row]
-                  (let [base (* row doubled)]
-                    (mapv (fn [i]
-                            (let [value (nth values (+ base i))
-                                  gate (nth values (+ base inner i))
-                                  activated (gelu gate)]
-                              (* value activated)))
-                          (range inner))))
-                (range rows)))
-        hidden (arr/from-vec (:backend x) gated (assoc shape (dec (count shape)) inner))]
-    (linear hidden (tensor! (:output-weight spec)) (tensor! (:output-bias spec)))))
+        axis (dec (count shape))
+        value (t/slice-axis projected axis 0 inner)
+        gate (t/slice-axis projected axis inner doubled)
+        activated (nm/gelu gate)
+        hidden (nm/mul value activated)
+        output (linear hidden (tensor! (:output-weight spec))
+                       (tensor! (:output-bias spec)))]
+    (doseq [temporary [projected value gate activated hidden]]
+      (arr/release! temporary))
+    output))
 
 (defn- spatial-transformer [value conditioning tensor! layer]
   (let [[batch channels height width] (:shape value)

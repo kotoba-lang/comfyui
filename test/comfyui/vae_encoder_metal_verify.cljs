@@ -42,6 +42,63 @@
         nchw (t/rgb-image-to-nchw image)]
     [nchw (t/nchw-to-rgb-image nchw)]))
 
+(defn- identity-values [size scale]
+  (mapv (fn [index]
+          (if (= (quot index size) (mod index size)) scale 0.0))
+        (range (* size size))))
+
+(defn- spatial-transformer [backend]
+  (let [matrix (arr/from-vec backend (identity-values 2 0.2) [2 2])
+        zeros (arr/zeros backend [2])
+        ones (arr/from-vec backend [1.0 1.0] [2])
+        conv (arr/from-vec backend [0.5 0.0 0.0 0.5] [2 2 1 1])
+        attention (fn [prefix]
+                    {(str prefix ".q") matrix (str prefix ".k") matrix
+                     (str prefix ".v") matrix (str prefix ".o") matrix
+                     (str prefix ".ob") zeros})
+        arrays (merge
+                {"gn.w" ones "gn.b" zeros "pin.w" conv "pin.b" zeros
+                 "pout.w" conv "pout.b" zeros
+                 "n1.w" ones "n1.b" zeros "n2.w" ones "n2.b" zeros
+                 "n3.w" ones "n3.b" zeros
+                 "ff.in.w" (arr/from-vec backend [0.4 0.1, -0.2 0.3,
+                                                    0.5 -0.1, 0.2 0.4] [4 2])
+                 "ff.in.b" (arr/zeros backend [4])
+                 "ff.out.w" matrix "ff.out.b" zeros}
+                (attention "self") (attention "cross"))
+        attention-spec (fn [prefix]
+                         {:query-weight (str prefix ".q")
+                          :key-weight (str prefix ".k")
+                          :value-weight (str prefix ".v")
+                          :output-weight (str prefix ".o")
+                          :output-bias (str prefix ".ob")})
+        spec {:layers
+              [{:op :spatial-transformer :groups 1
+                :norm-weight "gn.w" :norm-bias "gn.b"
+                :proj-in-weight "pin.w" :proj-in-bias "pin.b"
+                :proj-out-weight "pout.w" :proj-out-bias "pout.b"
+                :blocks [{:heads 1
+                          :norm1-weight "n1.w" :norm1-bias "n1.b"
+                          :self-attention (attention-spec "self")
+                          :norm2-weight "n2.w" :norm2-bias "n2.b"
+                          :cross-attention (attention-spec "cross")
+                          :norm3-weight "n3.w" :norm3-bias "n3.b"
+                          :feed-forward {:project-weight "ff.in.w"
+                                         :project-bias "ff.in.b"
+                                         :output-weight "ff.out.w"
+                                         :output-bias "ff.out.b"}}]}]}
+        component {:comfyui/read-tensor (fn [_ name] (get arrays name))}
+        denoise (model/compile-denoiser component backend spec)
+        sample (arr/from-vec backend (mapv #(- (* 0.1 %) 0.3) (range 8)) [1 2 2 2])
+        condition {:tensor (arr/from-vec backend [0.2 -0.1, 0.4 0.3, -0.2 0.5]
+                                                 [1 3 2])}]
+    (denoise sample 0 condition)))
+
+(defn- broadcast-batched-matmul [backend]
+  (t/matmul
+   (arr/from-vec backend (mapv #(* 0.1 (inc %)) (range 12)) [2 1 2 3])
+   (arr/from-vec backend (mapv #(- (* 0.05 %) 0.2) (range 12)) [1 2 3 2])))
+
 (defn -main [& _]
   (let [cpu-backend (cpu/cpu-backend)
         expected-output (compile-and-run cpu-backend)
@@ -49,7 +106,9 @@
         expected-denoise (arr/->vec (denoise cpu-backend))
         [expected-nchw expected-image] (image-conversions cpu-backend)
         expected-nchw-values (arr/->vec expected-nchw)
-        expected-image-values (arr/->vec expected-image)]
+        expected-image-values (arr/->vec expected-image)
+        expected-transformer (arr/->vec (spatial-transformer cpu-backend))
+        expected-batched (arr/->vec (broadcast-batched-matmul cpu-backend))]
     (-> (dg/request-device)
         (.then
          (fn [request]
@@ -59,12 +118,16 @@
              (.then
               (js/Promise.all
                #js [(arr/->vec output) (arr/->vec (denoise gpu))
-                    (arr/->vec gpu-nchw) (arr/->vec gpu-image)])
+                    (arr/->vec gpu-nchw) (arr/->vec gpu-image)
+                    (arr/->vec (spatial-transformer gpu))
+                    (arr/->vec (broadcast-batched-matmul gpu))])
               (fn [results]
                 (let [actual (aget results 0)
                       actual-denoise (aget results 1)
                       actual-nchw (aget results 2)
                       actual-image (aget results 3)
+                      actual-transformer (aget results 4)
+                      actual-batched (aget results 5)
                       close? (fn [expected actual]
                                (and (= (count expected) (count actual))
                                     (every? true?
@@ -77,7 +140,9 @@
                            (close? expected actual)
                            (close? expected-denoise actual-denoise)
                            (close? expected-nchw-values actual-nchw)
-                           (close? expected-image-values actual-image))
+                           (close? expected-image-values actual-image)
+                           (close? expected-transformer actual-transformer)
+                           (close? expected-batched actual-batched))
                     (throw
                      (ex-info "Metal liveness graphs differ from CPU"
                               {:shape (:shape output)
@@ -87,8 +152,12 @@
                                :expected-nchw expected-nchw-values
                                :actual-nchw actual-nchw
                                :expected-image expected-image-values
-                               :actual-image actual-image})))
-                  (println "OK VAE + image-boundary + saved-skip graphs match CPU with"
+                               :actual-image actual-image
+                               :expected-transformer expected-transformer
+                               :actual-transformer actual-transformer
+                               :expected-batched expected-batched
+                               :actual-batched actual-batched})))
+                  (println "OK VAE + image-boundary + SpatialTransformer graphs match CPU with"
                            "GPUBuffer.destroy on"
                            (dg/adapter-description request))))))))
         (.catch
