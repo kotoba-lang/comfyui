@@ -1,0 +1,252 @@
+(ns comfyui.diffusion.architecture-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [comfyui.diffusion.architecture :as architecture]
+            [comfyui.diffusion.scheduler :as scheduler]))
+
+(defn- checkpoint [context-dim in-channels label?]
+  {:tensors
+   (cond->
+    {"model.diffusion_model.input_blocks.0.0.weight"
+     {"shape" [320 in-channels 3 3]}
+     "model.diffusion_model.out.2.weight" {"shape" [4 320 3 3]}
+     "model.diffusion_model.input_blocks.1.1.transformer_blocks.0.attn2.to_k.weight"
+     {"shape" [320 context-dim]}
+     "cond_stage_model.transformer.text_model.embeddings.token_embedding.weight"
+     {"shape" [49408 context-dim]}
+     "first_stage_model.decoder.conv_out.weight" {"shape" [3 128 3 3]}}
+     label? (assoc "model.diffusion_model.label_emb.0.0.weight"
+                   {"shape" [1280 2816]}))})
+
+(deftest detects-stable-diffusion-families-from-structural-evidence
+  (testing "SD1/SD2 context widths and inpainting channels"
+    (is (= {:family :stable-diffusion-v1 :variant nil
+            :in-channels 4 :context-dim 768}
+           (select-keys (architecture/infer (checkpoint 768 4 false))
+                        [:family :variant :in-channels :context-dim])))
+    (is (= {:family :stable-diffusion-v2 :variant :inpainting
+            :in-channels 9 :context-dim 1024}
+           (select-keys (architecture/infer (checkpoint 1024 9 false))
+                        [:family :variant :in-channels :context-dim]))))
+  (testing "SDXL base/refiner use label conditioning plus distinct context widths"
+    (is (= :stable-diffusion-xl-base
+           (:family (architecture/infer (checkpoint 2048 4 true)))))
+    (is (= :stable-diffusion-xl-refiner
+           (:family (architecture/infer (checkpoint 1280 4 true))))))
+  (testing "unsupported context width remains unknown"
+    (is (= :unknown (:family (architecture/infer (checkpoint 1536 4 false)))))))
+
+(deftest stable-diffusion-scaled-linear-schedule-is-exact
+  (let [betas (scheduler/scaled-linear-betas 3 0.00085 0.012)
+        middle (Math/pow (/ (+ (Math/sqrt 0.00085) (Math/sqrt 0.012)) 2.0) 2)]
+    (is (= 0.00085 (first betas)))
+    (is (< (Math/abs (- middle (second betas))) 1.0e-15))
+    (is (< (Math/abs (- 0.012 (last betas))) 1.0e-15))
+    (is (= 1000 (count (architecture/default-alphas-cumprod
+                        {:family :stable-diffusion-v1}))))
+    (is (nil? (architecture/default-alphas-cumprod {:family :unknown})))))
+
+(deftest infers-complete-standard-sd1-clip-transformer-spec
+  (let [root "cond_stage_model.transformer.text_model."
+        base (checkpoint 768 4 false)
+        layer-base (str root "encoder.layers.0.")
+        names [(str root "embeddings.position_embedding.weight")
+               (str root "final_layer_norm.weight") (str root "final_layer_norm.bias")
+               (str layer-base "layer_norm1.weight") (str layer-base "layer_norm1.bias")
+               (str layer-base "self_attn.q_proj.weight") (str layer-base "self_attn.q_proj.bias")
+               (str layer-base "self_attn.k_proj.weight") (str layer-base "self_attn.k_proj.bias")
+               (str layer-base "self_attn.v_proj.weight") (str layer-base "self_attn.v_proj.bias")
+               (str layer-base "self_attn.out_proj.weight") (str layer-base "self_attn.out_proj.bias")
+               (str layer-base "layer_norm2.weight") (str layer-base "layer_norm2.bias")
+               (str layer-base "mlp.fc1.weight") (str layer-base "mlp.fc1.bias")
+               (str layer-base "mlp.fc2.weight") (str layer-base "mlp.fc2.bias")]
+        complete (update base :tensors merge
+                         (into {} (map (fn [name] [name {"shape" [768]}]) names)))
+        info (architecture/infer complete)
+        spec (architecture/infer-clip-spec complete info)]
+    (is (= 12 (:heads spec)))
+    (is (= 1 (count (:layers spec))))
+    (is (= (str layer-base "self_attn.q_proj.weight")
+           (:query-weight (first (:layers spec)))))
+    (is (nil? (architecture/infer-clip-spec
+               (update complete :tensors dissoc (str layer-base "mlp.fc2.bias")) info)))))
+
+(defn- hf-clip-tensors [root hidden]
+  (let [layer (str root "encoder.layers.0.")
+        suffixes ["layer_norm1.weight" "layer_norm1.bias"
+                  "self_attn.q_proj.weight" "self_attn.q_proj.bias"
+                  "self_attn.k_proj.weight" "self_attn.k_proj.bias"
+                  "self_attn.v_proj.weight" "self_attn.v_proj.bias"
+                  "self_attn.out_proj.weight" "self_attn.out_proj.bias"
+                  "layer_norm2.weight" "layer_norm2.bias"
+                  "mlp.fc1.weight" "mlp.fc1.bias"
+                  "mlp.fc2.weight" "mlp.fc2.bias"]]
+    (merge {(str root "embeddings.token_embedding.weight") {"shape" [100 hidden]}
+            (str root "embeddings.position_embedding.weight") {"shape" [77 hidden]}
+            (str root "final_layer_norm.weight") {"shape" [hidden]}
+            (str root "final_layer_norm.bias") {"shape" [hidden]}}
+           (into {} (map (fn [suffix] [(str layer suffix) {"shape" [hidden]}]) suffixes)))))
+
+(deftest infers-sdxl-dual-hf-clip-spec
+  (let [checkpoint* (update (checkpoint 2048 4 true) :tensors merge
+                            (hf-clip-tensors "conditioner.embedders.0.transformer.text_model."
+                                             768)
+                            (hf-clip-tensors "text_encoder_2.text_model." 1280))
+        spec (architecture/infer-clip-spec checkpoint* (architecture/infer checkpoint*))]
+    (is (= :dual (:mode spec)))
+    (is (= [12 20] (mapv :heads (:encoders spec))))
+    (is (= 2 (count (:encoders spec))))))
+
+(defn- openclip-tensors [root hidden]
+  (let [layer (str root "transformer.resblocks.0.")
+        suffixes ["ln_1.weight" "ln_1.bias" "attn.in_proj_weight"
+                  "attn.in_proj_bias" "attn.out_proj.weight" "attn.out_proj.bias"
+                  "ln_2.weight" "ln_2.bias" "mlp.c_fc.weight" "mlp.c_fc.bias"
+                  "mlp.c_proj.weight" "mlp.c_proj.bias"]]
+    (merge {(str root "token_embedding.weight") {"shape" [100 hidden]}
+            (str root "positional_embedding") {"shape" [77 hidden]}
+            (str root "ln_final.weight") {"shape" [hidden]}
+            (str root "ln_final.bias") {"shape" [hidden]}
+            (str root "text_projection") {"shape" [hidden hidden]}}
+           (into {} (map (fn [suffix] [(str layer suffix) {"shape" [hidden]}]) suffixes)))))
+
+(deftest infers-sdxl-hf-plus-openclip-fused-qkv
+  (let [checkpoint* (update (checkpoint 2048 4 true) :tensors merge
+                            (hf-clip-tensors "conditioner.embedders.0.transformer.text_model."
+                                             768)
+                            (openclip-tensors "conditioner.embedders.1.model." 1280))
+        spec (architecture/infer-clip-spec checkpoint* (architecture/infer checkpoint*))]
+    (is (= [:hf :openclip] (mapv :format (:encoders spec))))
+    (is (= [768 1280] (mapv :hidden (:encoders spec))))
+    (is (:return-penultimate? (second (:encoders spec))))
+    (is (string? (:in-proj-weight (first (:layers (second (:encoders spec)))))))))
+
+(deftest infers-complete-sdxl-time-and-label-embedding-prefix
+  (let [suffixes ["time_embed.0.weight" "time_embed.0.bias"
+                  "time_embed.2.weight" "time_embed.2.bias"
+                  "label_emb.0.0.weight" "label_emb.0.0.bias"
+                  "label_emb.0.2.weight" "label_emb.0.2.bias"]
+        checkpoint* (update (checkpoint 2048 4 true) :tensors merge
+                            (into {} (map (fn [suffix]
+                                           [(str "model.diffusion_model." suffix)
+                                            {"shape" [1280]}]) suffixes)))
+        info (architecture/infer checkpoint*)
+        layers (architecture/infer-sdxl-conditioning-layers checkpoint* info)]
+    (is (= [:timestep-vector :sdxl-label-embedding] (mapv :op layers)))
+    (is (= "model.diffusion_model.label_emb.0.2.weight"
+           (:second-weight (second layers))))
+    (is (nil? (architecture/infer-sdxl-conditioning-layers
+               (update checkpoint* :tensors dissoc
+                       "model.diffusion_model.label_emb.0.2.bias") info)))))
+
+(deftest enumerates-complete-compvis-unet-topology
+  (let [root "model.diffusion_model."
+        names ["input_blocks.0.0.weight"
+               "input_blocks.1.0.in_layers.0.weight"
+               "input_blocks.1.1.transformer_blocks.0.attn2.to_k.weight"
+               "input_blocks.2.0.op.weight"
+               "middle_block.0.in_layers.0.weight"
+               "middle_block.1.transformer_blocks.0.attn2.to_k.weight"
+               "middle_block.2.in_layers.0.weight"
+               "output_blocks.0.0.in_layers.0.weight"
+               "output_blocks.0.1.transformer_blocks.0.attn2.to_k.weight"
+               "output_blocks.1.0.in_layers.0.weight"
+               "output_blocks.1.1.conv.weight"
+               "out.0.weight" "out.0.bias" "out.2.weight" "out.2.bias"]
+        checkpoint* {:tensors (into {} (map (fn [name]
+                                              [(str root name) {"shape" [1]}]) names))}
+        layout (architecture/infer-unet-layout checkpoint*)]
+    (is (:complete? layout))
+    (is (= [:input-conv]
+           (mapv :kind (:modules (first (:input-blocks layout))))))
+    (is (= [:resblock :spatial-transformer]
+           (mapv :kind (:modules (second (:input-blocks layout))))))
+    (is (= [:resblock :spatial-transformer :resblock]
+           (mapv :kind (:middle-block layout))))
+    (is (= :upsample
+           (:kind (second (:modules (second (:output-blocks layout)))))))
+    (is (false? (:complete? (architecture/infer-unet-layout
+                             (update checkpoint* :tensors dissoc
+                                     (str root "out.2.bias"))))))))
+
+(deftest lowers-complete-resblock-tensor-catalog
+  (let [prefix "model.diffusion_model.input_blocks.1.0."
+        suffixes ["in_layers.0.weight" "in_layers.0.bias"
+                  "in_layers.2.weight" "in_layers.2.bias"
+                  "emb_layers.1.weight" "emb_layers.1.bias"
+                  "out_layers.0.weight" "out_layers.0.bias"
+                  "out_layers.3.weight" "out_layers.3.bias"
+                  "skip_connection.weight" "skip_connection.bias"]
+        checkpoint* {:tensors (into {} (map (fn [suffix]
+                                              [(str prefix suffix) {"shape" [1]}]) suffixes))}
+        layer (architecture/infer-resblock-layer
+               checkpoint* {:kind :resblock :prefix prefix})]
+    (is (= :resblock (:op layer)))
+    (is (= 32 (:groups layer)))
+    (is (= (str prefix "emb_layers.1.weight") (:embedding-weight layer)))
+    (is (= (str prefix "skip_connection.weight") (:skip-weight layer)))
+    (is (nil? (architecture/infer-resblock-layer
+               (update checkpoint* :tensors dissoc (str prefix "out_layers.3.bias"))
+               {:kind :resblock :prefix prefix})))))
+
+(deftest lowers-complete-spatial-transformer-catalog
+  (let [prefix "model.diffusion_model.input_blocks.1.1."
+        block (str prefix "transformer_blocks.0.")
+        fixed ["norm.weight" "norm.bias" "proj_in.weight" "proj_in.bias"
+               "proj_out.weight" "proj_out.bias"]
+        block-suffixes
+        ["norm1.weight" "norm1.bias" "norm2.weight" "norm2.bias"
+         "norm3.weight" "norm3.bias"
+         "attn1.to_q.weight" "attn1.to_k.weight" "attn1.to_v.weight"
+         "attn1.to_out.0.weight" "attn1.to_out.0.bias"
+         "attn2.to_q.weight" "attn2.to_k.weight" "attn2.to_v.weight"
+         "attn2.to_out.0.weight" "attn2.to_out.0.bias"
+         "ff.net.0.proj.weight" "ff.net.0.proj.bias"
+         "ff.net.2.weight" "ff.net.2.bias"]
+        tensors (merge
+                 (into {} (map (fn [suffix] [(str prefix suffix) {"shape" [64]}]) fixed))
+                 (into {} (map (fn [suffix]
+                                 [(str block suffix)
+                                  {"shape" (if (= suffix "attn1.to_q.weight")
+                                             [64 64] [64])}]) block-suffixes)))
+        checkpoint* {:tensors tensors}
+        module {:kind :spatial-transformer :prefix prefix}
+        layer (architecture/infer-spatial-transformer-layer checkpoint* module)]
+    (is (= :spatial-transformer (:op layer)))
+    (is (= 1 (get-in layer [:blocks 0 :heads])))
+    (is (= (str block "attn2.to_k.weight")
+           (get-in layer [:blocks 0 :cross-attention :key-weight])))
+    (is (false? (:linear-projection? layer)))
+    (is (nil? (architecture/infer-spatial-transformer-layer
+               (update checkpoint* :tensors dissoc (str block "ff.net.2.bias"))
+               module)))))
+
+(deftest assembles-complete-unet-graph-with-reversed-skips
+  (let [prefix "model.diffusion_model."
+        checkpoint* {:tensors {(str prefix "input_blocks.0.0.weight") {"shape" [4 4 3 3]}
+                               (str prefix "input_blocks.0.0.bias") {"shape" [4]}
+                               (str prefix "out.0.weight") {"shape" [4]}
+                               (str prefix "out.0.bias") {"shape" [4]}
+                               (str prefix "out.2.weight") {"shape" [4 4 3 3]}
+                               (str prefix "out.2.bias") {"shape" [4]}}}
+        module (fn [kind id] {:kind kind :prefix (str prefix id ".")})
+        layout {:prefix prefix :complete? true
+                :input-blocks [{:index 0 :modules [(module :input-conv "input.0")]}
+                               {:index 1 :modules [(module :resblock "input.1")]}]
+                :middle-block [(module :resblock "middle.0")
+                               (module :spatial-transformer "middle.1")
+                               (module :resblock "middle.2")]
+                :output-blocks [{:index 0 :modules [(module :resblock "output.0")]}
+                                {:index 1 :modules [(module :resblock "output.1")]}]}
+        lower-var (ns-resolve 'comfyui.diffusion.architecture 'lower-unet-module)
+        spec (with-redefs-fn
+               {#'architecture/infer-unet-layout (constantly layout)
+                #'architecture/infer-sdxl-conditioning-layers (fn [_ _] nil)
+                lower-var (fn [_ m] {:op (:kind m) :source (:prefix m)})}
+               #(architecture/infer-unet-spec checkpoint*
+                                                {:family :stable-diffusion-v1}))
+        layers (:layers spec)]
+    (is (= :stable-diffusion-v1 (:architecture spec)))
+    (is (= [:skip-0 :skip-1] (mapv :name (filter #(= :save (:op %)) layers))))
+    (is (= [:skip-1 :skip-0]
+           (mapv :name (filter #(= :cat-saved (:op %)) layers))))
+    (is (= [:groupnorm :silu :conv2d] (mapv :op (take-last 3 layers))))))

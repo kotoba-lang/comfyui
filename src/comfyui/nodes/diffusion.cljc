@@ -35,6 +35,14 @@
      {:clip {:type "CLIP"} :text {:type "STRING"}}
      [{:name "CONDITIONING" :type "CONDITIONING"}]))
 
+(def clip-text-encode-sdxl
+  (t "CLIPTextEncodeSDXL" "advanced/conditioning"
+     {:clip {:type "CLIP"} :text {:type "STRING"}
+      :width {:type "INT"} :height {:type "INT"}
+      :crop_w {:type "INT"} :crop_h {:type "INT"}
+      :target_width {:type "INT"} :target_height {:type "INT"}}
+     [{:name "CONDITIONING" :type "CONDITIONING"}]))
+
 (def empty-latent-image
   (t "EmptyLatentImage" "latent"
      {:width {:type "INT" :default 512} :height {:type "INT" :default 512}
@@ -112,6 +120,7 @@
   "The diffusion node pack — register alongside comfyui.std to validate
   image/video/audio workflows."
   [checkpoint-loader image-only-checkpoint-loader clip-loader clip-text-encode
+   clip-text-encode-sdxl
    empty-latent-image empty-latent-audio empty-ltxv-latent-video
    ltxv-conditioning ksampler svd-conditioning
    vae-decode vae-decode-audio load-image save-image save-animated-webp

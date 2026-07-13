@@ -7,8 +7,12 @@
  ;; ...) reader conditionals) and left for consumers to bring themselves
  ;; (every current consumer already declares them for its own server needs)
  ;; -- see the :test alias for how this repo's own tests supply them.
- :deps {io.github.kotoba-lang/langchain
-        {:git/sha "c74e358c486bdbbed415261abe352ae73831bb8e"}}
+ :deps {org.clojure/data.json {:mvn/version "2.5.1"}
+        io.github.kotoba-lang/langchain
+        {:git/sha "c74e358c486bdbbed415261abe352ae73831bb8e"}
+        ;; Workspace development against the UNet tensor/autograd branch.
+        ;; Replace with its merged git SHA before publishing.
+        io.github.kotoba-lang/num {:local/root "../num"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
@@ -17,14 +21,11 @@
                       http-kit/http-kit {:mvn/version "2.8.0"}
                       metosin/jsonista  {:mvn/version "0.3.11"}
                       ;; comfyui.nodes.toy-diffusion-test (ADR-2607131500
-                      ;; Phase 1) — real node :fn's, dispatched through the
-                      ;; real exec.cljc executor. Pinned past num.tensor-async
-                      ;; (toy_diffusion.cljc requires it unconditionally — the
-                      ;; :clj branch is a real, loadable throwing stub, not a
-                      ;; compile failure) AND past conv2d-mc/multi-head-
-                      ;; attention (ToyDiffusionStepMC needs both).
-                      io.github.kotoba-lang/num
-                      {:git/sha "4b04bd1e2e13a9edfe9cf910b37ae54c2c9fb7a3"}}
+                      ;; Phase 1) exercises both single- and multi-channel
+                      ;; real node functions. The workspace num dependency
+                      ;; above contains tensor-async, conv2d-mc, and
+                      ;; multi-head-attention.
+                      }
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
   ;; local checkout for workspace development (orgs/kotoba-lang/*)
