@@ -28,8 +28,15 @@
     :else nil))
 
 (defn- linear [x weight bias]
-  (let [transposed (t/transpose weight)
-        multiplied (t/matmul x transposed)
+  (let [shape (:shape x)
+        features (long (peek shape))
+        rows (quot (arr/nelems shape) features)
+        matrix (if (= 2 (count shape)) x (t/reshape x [rows features]))
+        transposed (t/transpose weight)
+        product (t/matmul matrix transposed)
+        multiplied (if (= 2 (count shape))
+                     product
+                     (t/reshape product (conj (pop shape) (first (:shape weight)))))
         output (if bias (t/add multiplied bias) multiplied)]
     (arr/release! transposed)
     (when bias (arr/release! multiplied))
@@ -306,7 +313,7 @@
       (arr/release! temporary))
     result))
 
-(defn- vae-attention-f32 [value tensor! layer]
+(defn- vae-attention [value tensor! layer]
   (let [[batch channels height width :as shape] (:shape value)
         normalized (t/group-norm-nchw
                     value (or (:groups layer) 32)
@@ -335,15 +342,6 @@
                        attended projected output]]
       (arr/release! temporary))
     result))
-
-(defn- vae-attention [value tensor! layer]
-  (if (= :f16 (:dtype value))
-    (let [input (arr/cast value :f32)
-          output (vae-attention-f32 input #(tensor! % :f32) layer)
-          result (arr/cast output :f16)]
-      (arr/release-all! [input output])
-      result)
-    (vae-attention-f32 value tensor! layer)))
 
 (defn- upsample [value scale-factor]
   (t/upsample-nearest2d value scale-factor))
@@ -433,21 +431,13 @@
   (let [cache (atom {})
         execution-layers (fuse-execution-layers layers)
         initial-saved-uses (saved-use-counts layers)
-        tensor! (fn tensor-reader
-                  ([tensor-name] (tensor-reader tensor-name nil))
-                  ([tensor-name dtype]
-                   (when tensor-name
-                     (let [cache-key (if dtype [tensor-name dtype] tensor-name)]
-                       (or (get @cache cache-key)
-                           (let [source (or (get @cache tensor-name)
-                                            ((:comfyui/read-tensor component)
-                                             backend tensor-name))
-                                 _ (swap! cache assoc tensor-name source)
-                                 tensor (if (and dtype (not= dtype (:dtype source)))
-                                          (arr/cast source dtype)
-                                          source)]
-                             (swap! cache assoc cache-key tensor)
-                             tensor))))))]
+        tensor! (fn [tensor-name]
+                  (when tensor-name
+                    (or (get @cache tensor-name)
+                        (let [tensor ((:comfyui/read-tensor component)
+                                      backend tensor-name)]
+                          (swap! cache assoc tensor-name tensor)
+                          tensor))))]
     (with-meta
       (fn [sample timestep conditioning]
         (let [initial {:value sample :saved {} :embedding nil

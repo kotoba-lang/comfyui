@@ -599,18 +599,19 @@ checkpoint traffic falls from 197,960,796 to 98,980,398 bytes. Convolution,
 GroupNorm, SiLU, residual addition, and their weights and activations now remain
 in physical F16 Metal buffers. Nearest upsample and channel slice now also stay
 in F16. Scalar scale is native F16 and final RGB conversion unpacks directly
-to its required f32 image output. VAE attention is the remaining explicit F16/F32 boundary;
-the ten cached F32 attention tensors make 150 cached buffers in total.
+to its required f32 image output. VAE attention, its projections, transpose,
+stable softmax, and bias addition now remain F16 as well, so all 140 decoder
+weights have one cached physical-F16 buffer and there is no internal F32 cast boundary.
 
 On Apple M4 this mixed-precision run emitted a 437,945-byte 512×512 PNG with
 image sum 354,452.799645, returned to zero live buffers and bytes, and reduced
-peak tracked GPU memory from 208,513,196 to 108,496,000 bytes (48.0%). It took
-33,558.514 ms versus the comparable F32 path's 30,656.186 ms. Replacing the
+peak tracked GPU memory from 208,513,196 to 104,289,408 bytes (50.0%). It took
+34,520.805 ms versus the comparable F32 path's 30,656.186 ms. Replacing the
 per-output scalar GroupNorm statistics with one 256-thread reduction per group
 made the same F16 workload 6.27× faster than its prior 212,110.667 ms run. The
 final RGB8 comparison against F32 has maximum error 2/255 and mean error
-0.0596/255. This is verified native mixed-precision execution with a 9.5%
-runtime cost and a 48.0% peak-memory reduction; packed convolution optimization
+0.0603/255. This is verified native mixed-precision execution with a 12.6%
+runtime cost and a 50.0% peak-memory reduction; packed convolution optimization
 and eliminating remaining cast boundaries are still necessary.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
