@@ -601,20 +601,21 @@ in physical F16 Metal buffers. Unsupported attention, upsample, scale, slice,
 and final RGB conversion boundaries use explicit device-side F16/F32 casts;
 the ten cached F32 attention tensors make 150 cached buffers in total.
 
-On Apple M4 this mixed-precision run emitted a 437,936-byte 512×512 PNG with
-image sum 354,452.402975, returned to zero live buffers and bytes, and reduced
+On Apple M4 this mixed-precision run emitted a 437,945-byte 512×512 PNG with
+image sum 354,452.799645, returned to zero live buffers and bytes, and reduced
 peak tracked GPU memory from 208,513,196 to 111,117,376 bytes (46.7%). It took
-212,110.667 ms versus the F32 path's 29,275.810 ms, so the current scalar F16
-kernel path is substantially slower despite using less memory. The final RGB8
-comparison against F32 has maximum error 2/255 and mean error 0.0656/255. This
-is verified native mixed-precision execution, but it is not yet a performance win; tiled
-dispatch overhead, packed-kernel optimization, and eliminating cast boundaries
-remain necessary.
+33,827.506 ms versus the comparable F32 path's 30,656.186 ms. Replacing the
+per-output scalar GroupNorm statistics with one 256-thread reduction per group
+made the same F16 workload 6.27× faster than its prior 212,110.667 ms run. The
+final RGB8 comparison against F32 has maximum error 2/255 and mean error
+0.0596/255. This is verified native mixed-precision execution with a 10.3%
+runtime cost and a 46.7% peak-memory reduction; packed convolution optimization
+and eliminating remaining cast boundaries are still necessary.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
 upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,
-additional VAE variants, faster mixed precision, and an installed real
+additional VAE variants, further mixed-precision optimization, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 
