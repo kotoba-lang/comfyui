@@ -146,6 +146,18 @@
     (is (approx? 2.0 (scheduler/sigma->timestep
                       alphas (scheduler/alpha->sigma 0.1))))))
 
+(deftest exponential-and-polyexponential-match-k-diffusion-reference
+  (let [exponential (scheduler/exponential-sigmas 3 0.1 10.0)
+        poly (scheduler/polyexponential-sigmas 3 0.1 10.0 2.0)]
+    (is (every? true? (map approx? [10.0 1.0 0.1 0.0] exponential)))
+    (is (every? true?
+                (map approx? [10.0 0.31622776601683794 0.1 0.0] poly)))
+    (is (= exponential (scheduler/polyexponential-sigmas 3 0.1 10.0)))
+    (is (= exponential (scheduler/sigma-schedule "exponential" 3 0.1 10.0)))
+    (is (= poly (scheduler/polyexponential-sigmas 3 0.1 10.0 2.0)))
+    (is (apply > (butlast exponential)))
+    (is (apply > (butlast poly)))))
+
 (deftest dpmpp-2m-consumes-explicit-karras-sigmas-and-fractional-timesteps
   (let [calls (atom []) events (atom [])
         alphas [0.92 0.8 0.6 0.4]

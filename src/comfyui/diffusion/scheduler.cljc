@@ -221,6 +221,59 @@
             (range steps))
       0.0))))
 
+(defn exponential-sigmas
+  "Construct k-diffusion's log-linearly spaced exponential schedule, including
+  terminal zero."
+  [steps sigma-min sigma-max]
+  (when-not (and (pos-int? steps) (< 0.0 sigma-min sigma-max))
+    (throw (ex-info "invalid exponential schedule"
+                    {:steps steps :sigma-min sigma-min :sigma-max sigma-max})))
+  (let [log-min (Math/log sigma-min)
+        log-max (Math/log sigma-max)]
+    (conj
+     (mapv (fn [index]
+             (let [ramp (if (= steps 1)
+                          1.0
+                          (- 1.0 (/ index (double (dec steps)))))]
+               (Math/exp (+ log-min (* ramp (- log-max log-min))))))
+           (range steps))
+     0.0)))
+
+(defn polyexponential-sigmas
+  "Construct k-diffusion's polynomial curve in log-sigma space. `rho=1`
+  equals the exponential schedule; larger rho concentrates steps near
+  `sigma-min`. Includes terminal zero."
+  ([steps sigma-min sigma-max]
+   (polyexponential-sigmas steps sigma-min sigma-max 1.0))
+  ([steps sigma-min sigma-max rho]
+   (when-not (and (pos-int? steps) (< 0.0 sigma-min sigma-max) (pos? rho))
+     (throw (ex-info "invalid polyexponential schedule"
+                     {:steps steps :sigma-min sigma-min
+                      :sigma-max sigma-max :rho rho})))
+   (let [log-min (Math/log sigma-min)
+         log-max (Math/log sigma-max)]
+     (conj
+      (mapv (fn [index]
+              (let [linear (if (= steps 1)
+                             1.0
+                             (- 1.0 (/ index (double (dec steps)))))
+                    ramp (Math/pow linear rho)]
+                (Math/exp (+ log-min (* ramp (- log-max log-min))))))
+            (range steps))
+      0.0))))
+
+(defn sigma-schedule
+  "Dispatch a ComfyUI/k-diffusion continuous sigma schedule by name."
+  [schedule steps sigma-min sigma-max]
+  (case schedule
+    ("karras" :karras) (karras-sigmas steps sigma-min sigma-max)
+    ("exponential" :exponential)
+    (exponential-sigmas steps sigma-min sigma-max)
+    ("polyexponential" :polyexponential)
+    (polyexponential-sigmas steps sigma-min sigma-max)
+    (throw (ex-info "unsupported continuous sigma schedule"
+                    {:schedule schedule}))))
+
 (defn sigma->timestep
   "Map a continuous sigma to a fractional discrete model timestep by linear
   interpolation in log-sigma space, matching k-diffusion DiscreteSchedule."

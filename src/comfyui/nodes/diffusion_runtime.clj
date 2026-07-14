@@ -467,11 +467,12 @@
                      sampler_name scheduler denoise]}]
           (when-not (and (contains? #{"ddim" "euler" "euler_ancestral"
                                       "dpmpp_2m"} sampler_name)
-                         (contains? #{"normal" "karras"} scheduler)
+                         (contains? #{"normal" "karras" "exponential"
+                                      "polyexponential"} scheduler)
                          (not (and (= "ddim" sampler_name)
-                                   (= "karras" scheduler)))
+                                   (not= "normal" scheduler)))
                          (< 0.0 (double denoise) 1.0000000001))
-            (throw (ex-info "runtime KSampler supports denoise in (0,1], normal schedules, and Karras for Euler/DPM++"
+            (throw (ex-info "runtime KSampler supports denoise in (0,1], normal DDIM, and continuous sigma schedules for Euler/DPM++"
                             {:sampler-name sampler_name :scheduler scheduler :denoise denoise})))
           (let [denoise-fn (:comfyui/denoise model)
                 alphas (:comfyui/alphas-cumprod model)
@@ -491,18 +492,18 @@
                 total-steps (if (= 1.0 denoise)
                               steps
                               (max steps (long (/ steps denoise))))
-                karras? (= "karras" scheduler)
+                continuous-sigma? (not= "normal" scheduler)
                 explicit-sigmas
-                (when karras?
+                (when continuous-sigma?
                   (vec
                    (take-last
                     (inc steps)
-                    (scheduler/karras-sigmas
-                     total-steps
+                    (scheduler/sigma-schedule
+                     scheduler total-steps
                      (scheduler/alpha->sigma (double (first alphas)))
                      (scheduler/alpha->sigma (double (last alphas)))))))
                 timesteps
-                (if karras?
+                (if continuous-sigma?
                   (mapv #(scheduler/sigma->timestep alphas %)
                         (butlast explicit-sigmas))
                   (vec

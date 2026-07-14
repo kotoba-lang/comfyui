@@ -181,11 +181,13 @@ execution while retaining the upstream class names and wire types:
   sigma-up noise. DPM++ 2M follows k-diffusion's exponential multistep
   recurrence, retains the previous denoised estimate for its second-order
   correction, and handles terminal sigma zero as an exact denoised-x0 step.
-  Euler and DPM++ additionally accept the Karras rho-7 sigma schedule. Continuous
+  Euler and DPM++ additionally accept Karras rho-7, exponential, and
+  polyexponential sigma schedules. Continuous
   sigma values are mapped back to fractional model timesteps by interpolation in
   log-sigma space, matching k-diffusion's discrete epsilon-model wrapper.
   The current executable subset is `ddim` + `normal`, or
-  `euler|euler_ancestral|dpmpp_2m` + `normal|karras`. Denoise values in `(0,1]`
+  `euler|euler_ancestral|dpmpp_2m` +
+  `normal|karras|exponential|polyexponential`. Denoise values in `(0,1]`
   are supported: the runtime builds `floor(steps/denoise)` levels and retains
   the final requested step interval, matching ComfyUI's partial-denoise schedule
   slicing. DDIM noises an existing latent in alpha space for partial denoise;
@@ -517,8 +519,9 @@ match their independent numerical oracles, emit 852/848-byte PNGs, close the
 three lazy files, release conditioning/latent/image and all cached weights, and
 finish at zero tracked GPU buffers. The measured F32 peak is 7,738,644 bytes.
 The Deno `KSampler` shares the production scheduler implementations with the
-JVM runtime: `ddim`, `euler`, `euler_ancestral`, and `dpmpp_2m`, using `normal`
-or Karras rho-7 sigma schedules where valid, plus partial-denoise timestep
+JVM runtime: `ddim`, `euler`, `euler_ancestral`, and `dpmpp_2m`, using `normal`,
+Karras rho-7, exponential, or polyexponential sigma schedules where valid,
+plus partial-denoise timestep
 slicing. Initial and ancestral noise remain an injected seeded host function.
 The real F32 seven-node graph was run for all seven valid sampler/scheduler
 combinations; every run produced a finite 16×16 PNG and returned to zero live
@@ -543,7 +546,7 @@ and kernel fusion remain required.
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
 upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,
-exponential/polyexponential schedules, additional VAE variants, mixed precision, and an installed real
+additional VAE variants, mixed precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 

@@ -195,8 +195,10 @@
                  sampler_name scheduler denoise]}]
       (when-not (and (contains? #{"ddim" "euler" "euler_ancestral" "dpmpp_2m"}
                                 sampler_name)
-                     (contains? #{"normal" "karras"} scheduler)
-                     (not (and (= "ddim" sampler_name) (= "karras" scheduler)))
+                     (contains? #{"normal" "karras" "exponential"
+                                  "polyexponential"} scheduler)
+                     (not (and (= "ddim" sampler_name)
+                               (not= "normal" scheduler)))
                      (< 0.0 (double denoise) 1.0000000001)
                      (fn? noise-fn))
         (throw (ex-info "unsupported Deno sampler/scheduler/denoise combination"
@@ -208,15 +210,15 @@
             denoise (double denoise)
             total-steps (if (= 1.0 denoise)
                           steps (max steps (long (/ steps denoise))))
-            karras? (= "karras" scheduler)
-            explicit-sigmas (when karras?
+            continuous-sigma? (not= "normal" scheduler)
+            explicit-sigmas (when continuous-sigma?
                               (vec (take-last
                                     (inc steps)
-                                    (scheduler/karras-sigmas
-                                     total-steps
+                                    (scheduler/sigma-schedule
+                                     scheduler total-steps
                                      (scheduler/alpha->sigma (double (first alphas)))
                                      (scheduler/alpha->sigma (double (last alphas)))))))
-            timesteps (if karras?
+            timesteps (if continuous-sigma?
                         (mapv #(scheduler/sigma->timestep alphas %)
                               (butlast explicit-sigmas))
                         (vec (take-last steps (timesteps-fn alphas total-steps))))
