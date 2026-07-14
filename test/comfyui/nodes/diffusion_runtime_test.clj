@@ -419,3 +419,23 @@
     (is (= [1024 1024] (:target-size conditioning)))
     (is (identical? tensor (:tensor conditioning)))
     (is (identical? pooled (:pooled conditioning)))))
+
+(deftest save-image-reserves-non-overlapping-batch-counters
+  (let [directory (Files/createTempDirectory "comfyui-batch-save"
+                                             (make-array FileAttribute 0))
+        save-node (first (filter #(= "SaveImage" (:type %))
+                                 (runtime/pack {:backend backend
+                                                :output-directory directory})))
+        images (arr/from-vec backend [1.0 0.0 0.0, 0.0 1.0 0.0] [2 1 1 3])]
+    (try
+      (let [[first-ui] ((:fn save-node) {:images images :filename_prefix "batch"})
+            [second-ui] ((:fn save-node) {:images images :filename_prefix "batch"})
+            names (mapv :filename (concat (:images first-ui) (:images second-ui)))]
+        (is (= ["batch_00000.png" "batch_00001.png"
+                "batch_00002.png" "batch_00003.png"] names))
+        (is (every? #(Files/exists (.resolve directory %)
+                                   (make-array java.nio.file.LinkOption 0)) names)))
+      (finally
+        (doseq [index (range 4)]
+          (Files/deleteIfExists (.resolve directory (format "batch_%05d.png" index))))
+        (Files/deleteIfExists directory)))))

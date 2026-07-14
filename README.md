@@ -21,8 +21,9 @@ src/comfyui/
   std.cljc             standard node pack (primitives, math, text, Preview)
   viz.cljc             workflow → Mermaid
   nodes/langchain.cljc ChatModel / tool nodes bridging to langchain-clj
-  safetensors.clj     lazy, validated F16/BF16/F32 checkpoint reader
-  diffusion/model.clj checkpoint-backed UNet graph lowering/execution
+  safetensors.clj      lazy, validated JVM checkpoint reader
+  safetensors_deno.cljs direct validated Deno/Metal checkpoint reader
+  diffusion/model.cljc checkpoint-backed UNet/VAE graph lowering/execution
   diffusion/          real noise schedules and DDIM latent transitions
 ```
 
@@ -115,6 +116,32 @@ the ComfyUI → comfyui-clj correspondence table (NODE_CLASS_MAPPINGS,
 API format, /object_info, /prompt + /queue + /history) and the
 engine/inference split rationale. License is GPL-3.0, matching
 upstream ComfyUI.
+
+## Deno prompt server
+
+`comfyui.server` exposes the execution engine through a real Fetch/Deno HTTP
+listener. `POST /prompt` validates API-format workflows before assigning a UUID,
+then a serialized asynchronous pump runs Promise-returning Metal nodes without
+overlapping graph ownership. `GET /queue`, `GET /prompt`, `GET /history`,
+`GET /history/{prompt_id}`, `GET /object_info`, and
+`GET /object_info/{node_class}` use ComfyUI-compatible response shapes; invalid
+workflows return HTTP 400 with `node_errors`. `POST /queue` clears or removes
+pending prompt IDs. `/view` serves PNG artifacts only after canonical-path
+confinement to the configured output directory.
+
+```sh
+clojure -M:deno-server-verify
+deno run --allow-all target/deno-server-verify.cjs
+# /prompt → serialized execution → /history: passed
+# /queue and /object_info contracts: passed
+# confined /view artifact serving: passed
+```
+
+The live verifier submits two workflows concurrently to an ephemeral TCP port,
+proves peak graph concurrency remains one and completion order is stable, polls
+both UUID histories, checks node metadata and artifact bytes, and confirms an
+unknown node is rejected. WebSocket progress events, user/session isolation,
+authentication, and durable queue recovery remain production boundaries.
 
 ## Executable diffusion foundation
 
@@ -349,6 +376,155 @@ and 70 VAE tensors loaded, a real 852-byte PNG was emitted, CLIP max error was
 and image max/sum errors `1.19e-5` / `7.80e-5`.
 Full-denoise DDIM begins from the seeded noise tensor (`init_noise_sigma=1`),
 while Euler retains sigma-scaled initialization.
+
+The same public split checkpoint now runs directly through Deno WebGPU/Metal;
+it is no longer restricted to the JVM CPU loader. The JVM exporter inspects
+tensor metadata/configs and emits only the inferred graph, schedule, and token
+IDs. Deno independently validates each safetensors byte window, decodes
+floating-point and integer dtypes, lazily uploads the requested weights, and
+executes CLIP → two CFG UNet/DDIM steps → VAE without a Python runtime:
+
+```sh
+clojure -M:export-diffusers-metal-spec pipeline.edn \
+  unet/model.safetensors unet/config.json \
+  text_encoder/model.safetensors text_encoder/config.json \
+  vae/model.safetensors vae/config.json scheduler/scheduler_config.json \
+  tokenizer/vocab.json tokenizer/merges.txt
+clojure -M:real-diffusers-metal-verify
+deno run --allow-all target/real-diffusers-metal-verify.cjs \
+  pipeline.edn unet/model.safetensors text_encoder/model.safetensors \
+  vae/model.safetensors output.png
+```
+
+On Apple M4, `Narsil/tiny-stable-diffusion-torch` completes this verifier with
+the same pinned PyTorch tolerances above, peaks at 7,744,788 tracked GPU-buffer
+bytes, and returns to exactly zero live buffers/bytes after outputs and all
+three lazy weight caches are released. With a num backend exposing raw byte-view
+upload, 7,590,224 checkpoint bytes are transferred from their validated F32
+safetensors windows without first allocating per-element JavaScript numbers;
+older backends retain the decoded-vector fallback. NCHW channel embedding broadcast is
+lowered through device-native transpose plus last-axis bias dispatch, so this
+real UNet path performs no synchronous GPU readback.
+The Deno reader keeps an open file handle rather than retaining the whole
+checkpoint in a `Uint8Array`: it reads the bounded JSON header once and seeks to
+one validated tensor window per lazy cache miss. Across the 7,590,224 bytes used
+by the public tiny pipeline, the largest host window is 294,912 bytes. The
+verifiers close each file explicitly, reject reads after close, and still return
+all tracked GPU storage to baseline.
+F16 and BF16 safetensors windows use the same route when supported: encoded
+16-bit words are uploaded unchanged, expanded by Metal into the current f32
+execution graph, and the temporary packed buffer is immediately retired.
+`safetensors-deno-metal-verify` builds a valid odd-length file containing both
+dtypes and proves their device expansion plus exact return to the GPU-memory
+baseline; an older num backend exercises the numerically identical host fallback.
+
+For whole-model precision regression, `convert-safetensors-f16` rewrites one
+checkpoint at a time, quantizing floating tensors while preserving integer
+tensors, names, shapes, metadata, and lazy bounded I/O:
+
+```sh
+clojure -M:convert-safetensors-f16 model.safetensors model-f16.safetensors
+```
+
+The public tiny pipeline was converted across all 304 UNet tensors, 85 CLIP
+entries, and 124 VAE entries. Its executable graph then loaded 304/84/70 F16
+tensors through device expansion (458 direct uploads, zero decoded uploads),
+matched an independent JVM CPU execution of the same quantized files within the
+existing Metal tolerances, and returned to zero live GPU bytes. Requested
+checkpoint traffic fell from 7,590,224 F32 bytes to 3,795,112 F16 bytes and the
+largest host window from 294,912 to 147,456 bytes.
+
+The Metal verifier now ends at an actual image artifact rather than a pixel
+vector. `comfyui.png-deno` quantizes the final NHWC RGB values to RGB8, emits
+filter-0 scanlines, compresses them with the host `CompressionStream`, and
+writes CRC-populated IHDR/IDAT/IEND chunks without Python, JVM ImageIO, or a PNG
+dependency. The F32 public-checkpoint run emits a valid non-interlaced 16×16 RGB
+PNG of 852 bytes; its fully F16 checkpoint run emits 848 bytes. The verifier
+parses IHDR dimensions itself, requires a non-empty compressed artifact, and an
+external `file` probe recognizes both outputs as 8-bit/color RGB PNG files.
+
+`comfyui.nodes.diffusion-runtime-deno/pack` exposes this path through real
+ComfyUI node types rather than verifier-only function calls. Its executable
+`DiffusersPipelineLoader`, `CLIPTextEncode`, `EmptyLatentImage`, `KSampler`,
+`VAEDecode`, and `SaveImage` nodes are registered in the ordinary node registry
+and run through `comfyui.exec/execute-async`. Tokenization and seeded noise stay
+explicit host capabilities; unsupported sampler combinations fail rather than
+silently changing algorithms. The live graph gate runs this API-format graph:
+
+The Deno pack now includes the img2img boundary as well. `LoadImage` reads an
+input-directory-confined RGB/RGBA PNG, validates chunk CRCs, implements all five
+scanline filters, emits normalized NHWC RGB plus ComfyUI's inverse-alpha mask,
+and rejects canonical-path escapes. `DiffusersPipelineLoader` compiles the
+inferred VAE encoder when present; `VAEEncode` performs device-native RGB→NCHW
+conversion and returns a latent accepted directly by partial-denoise `KSampler`.
+A live Apple Metal verifier compares decoded pixels and latent values with the
+CPU oracle, checks corrupt-CRC/path-escape rejection, and restores the exact GPU
+buffer baseline:
+
+```sh
+clojure -M:deno-img2img-nodes-verify
+deno run --allow-all target/deno-img2img-nodes-verify.cjs
+# PNG CRC and path confinement: passed
+# Deno PNG LoadImage → VAEEncode on Apple M4 passed
+# GPU baseline restored: passed
+```
+
+`SaveImage` no longer restricts the Deno host to batch size one or overwrites
+`prefix_00000.png` on every execution. JVM and Deno reserve one contiguous,
+process-safe counter range per output directory/prefix, account for files already
+on disk, encode every NHWC batch row, and return one ComfyUI UI metadata entry per
+artifact. Repeated two-image saves produce `00000` through `00003`; the Metal
+verifier parses all four PNG dimensions and confirms the downloaded batch tensor
+is released.
+
+The txt2img graph remains:
+
+```text
+DiffusersPipelineLoader ─┬─ CLIPTextEncode(positive) ─┐
+                         ├─ CLIPTextEncode(negative) ─┼─ KSampler
+EmptyLatentImage ─────────────────────────────────────┘     │
+DiffusersPipelineLoader.VAE ────────────────────────── VAEDecode → SaveImage
+```
+
+```sh
+clojure -M:real-diffusers-graph-metal-verify
+deno run --allow-all target/real-diffusers-graph-metal-verify.cjs \
+  pipeline.edn unet/model.safetensors text_encoder/model.safetensors \
+  vae/model.safetensors output-directory
+
+# Optional full-checkpoint img2img graph
+deno run --allow-all target/real-diffusers-graph-metal-verify.cjs \
+  pipeline.edn unet/model.safetensors text_encoder/model.safetensors \
+  vae/model.safetensors output-directory ddim normal img2img
+```
+
+Both F32 and fully converted F16 public checkpoints execute all seven nodes,
+match their independent numerical oracles, emit 852/848-byte PNGs, close the
+three lazy files, release conditioning/latent/image and all cached weights, and
+finish at zero tracked GPU buffers. The measured F32 peak is 7,738,644 bytes.
+The Deno `KSampler` shares the production scheduler implementations with the
+JVM runtime: `ddim`, `euler`, `euler_ancestral`, and `dpmpp_2m`, using `normal`
+or Karras rho-7 sigma schedules where valid, plus partial-denoise timestep
+slicing. Initial and ancestral noise remain an injected seeded host function.
+The real F32 seven-node graph was run for all seven valid sampler/scheduler
+combinations; every run produced a finite 16×16 PNG and returned to zero live
+GPU buffers, with PNG sizes from 847 to 859 bytes. DDIM additionally retains its
+pinned PyTorch trajectory comparison; the scheduler's dedicated live Metal gate
+provides CPU parity for Euler/ancestral/DPM++ transitions.
+
+This path now has an end-to-end wall-clock measurement, not a queue-submission
+timing. The interval starts after WebGPU device negotiation and ends only after
+lazy tensor reads, pipeline compilation, seven-node execution, final GPU
+readback, zlib compression, and PNG write have completed. Five fresh Deno
+processes on Apple M4 measured F32 DDIM at 456.876–502.047 ms (mean 481.715 ms,
+median 480.645 ms). The independent JVM CPU pipeline took 55.765 s for the same
+fixed two-step graph, roughly 116× the Metal interval. F16 checkpoint expansion
+measured 557.774–601.661 ms (mean 581.062 ms): it halves checkpoint traffic but
+is slower for this tiny model because 458 separate half-expansion dispatches
+dominate. Single fresh-process measurements for the other six F32 combinations
+were 488.312–541.193 ms. These are tiny 16×16 output measurements with warm OS
+file cache, not evidence for 512×512 production throughput; full-size profiling
+and kernel fusion remain required.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
