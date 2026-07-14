@@ -130,7 +130,10 @@ pending prompt IDs. `/view` serves PNG artifacts only after canonical-path
 confinement to the configured output directory. `GET /ws?clientId=...` upgrades
 to WebSocket and emits ComfyUI-style `status`, `execution_start`, `executing`,
 `execution_success`, and `execution_error` messages from the same serialized
-queue and real node-execution events used by the HTTP history.
+queue and real node-execution events used by the HTTP history. Successful output
+nodes that return PNG artifacts also emit the upstream binary preview frame:
+big-endian type `1`, PNG format `2`, then the exact file bytes after an
+output-directory confinement and PNG-signature check.
 
 ```sh
 clojure -M:deno-server-verify
@@ -139,6 +142,7 @@ deno run --allow-all target/deno-server-verify.cjs
 # /queue and /object_info contracts: passed
 # confined /view artifact serving: passed
 # WebSocket status and execution events: passed
+# binary PNG preview and client isolation: passed
 ```
 
 The live verifier submits two successful workflows and one intentionally failing
@@ -147,8 +151,11 @@ remains one and completion order is stable, polls all UUID histories, checks nod
 metadata and artifact bytes, and confirms an unknown node is rejected. It also
 opens a real WebSocket before submission and proves prompt IDs, node order,
 success/error notifications (including the failed node ID), and final queue depth
-agree with HTTP history. Per-user execution isolation, authentication, binary
-preview frames, and durable queue recovery remain production boundaries.
+agree with HTTP history. It decodes two binary preview headers, compares each PNG
+payload byte-for-byte with `/view`, and proves a second client receives neither
+another client's progress nor its previews when `client_id` is supplied.
+Authentication, incremental latent previews during sampler steps, and durable
+queue recovery remain production boundaries.
 
 ## Executable diffusion foundation
 

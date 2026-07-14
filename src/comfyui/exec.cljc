@@ -172,7 +172,8 @@
                             (when cache (-cache-put! cache k outputs))
                             outputs))]
                   (when on-event
-                    (on-event {:node id :class class_type :cached? (some? hit)}))
+                    (on-event {:node id :class class_type :cached? (some? hit)
+                               :output outputs}))
                   {:keys (assoc keys id k)
                    :results (assoc results id outputs)
                    :execs (conj execs {:node id :class class_type :key k
@@ -235,7 +236,9 @@
                            (on-node-start {:node id :class class_type
                                            :cached? (some? hit)}))
                          (if hit
-                           (do (when on-event (on-event {:node id :class class_type :cached? true}))
+                           (do (when on-event
+                                 (on-event {:node id :class class_type :cached? true
+                                            :output hit}))
                                (->p {:keys (assoc keys id k)
                                      :results (assoc results id hit)
                                      :execs (conj execs {:node id :class class_type :key k
@@ -255,7 +258,9 @@
                                     (fn [r]
                                       (let [outputs (if (vector? r) r [r])]
                                         (when cache (-cache-put! cache k outputs))
-                                        (when on-event (on-event {:node id :class class_type :cached? false}))
+                                        (when on-event
+                                          (on-event {:node id :class class_type
+                                                     :cached? false :output outputs}))
                                         {:keys (assoc keys id k)
                                          :results (assoc results id outputs)
                                          :execs (conj execs {:node id :class class_type :key k

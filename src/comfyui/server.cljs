@@ -75,6 +75,54 @@
     (send-message! socket type data))
   nil)
 
+(defn- entry-sockets [server* entry]
+  (let [clients @(:clients server*)]
+    (if-let [client-id (:client-id entry)]
+      (if-let [socket (get clients client-id)] [socket] [])
+      (vals clients))))
+
+(defn- emit! [server* entry type data]
+  (doseq [socket (entry-sockets server* entry)]
+    (send-message! socket type data))
+  nil)
+
+(defn- preview-frame [png-bytes]
+  (let [frame (js/Uint8Array. (+ 8 (.-byteLength png-bytes)))
+        view (js/DataView. (.-buffer frame))]
+    (.setUint32 view 0 1 false)
+    (.setUint32 view 4 2 false)
+    (.set frame png-bytes 8)
+    frame))
+
+(defn- png-bytes? [bytes]
+  (and (<= 8 (.-byteLength bytes))
+       (= [137 80 78 71 13 10 26 10]
+          (mapv #(aget bytes %) (range 8)))))
+
+(defn- preview-file-frame [directory path]
+  (try
+    (when (string? path)
+      (let [candidate (js/Deno.realPathSync path)]
+        (when (and (.startsWith candidate (str directory "/"))
+                   (.-isFile (js/Deno.statSync candidate)))
+          (let [bytes (js/Deno.readFileSync candidate)]
+            (when (png-bytes? bytes) (preview-frame bytes))))))
+    (catch :default _ nil)))
+
+(defn- emit-previews! [server* entry event]
+  (try
+    (let [root (get-in server* [:ctx :output-directory])
+          images (->> (:output event) (filter map?) (mapcat :images))]
+      (when (and (seq root) (seq images))
+        (let [directory (js/Deno.realPathSync root)]
+          (doseq [{:keys [path]} images]
+            (when-let [frame (preview-file-frame directory path)]
+              (doseq [socket (entry-sockets server* entry)]
+                (when (= 1 (.-readyState socket))
+                  (.send socket frame))))))))
+    (catch :default _ nil))
+  nil)
+
 (defn- broadcast-status! [server*]
   (broadcast! server* "status"
               {:status {:exec_info {:queue_remaining (queue-remaining server*)}}}))
@@ -82,12 +130,19 @@
 (defn- queue-item [{:keys [number id prompt extra-data outputs]}]
   [number id prompt extra-data outputs])
 
+(defn- public-output [value]
+  (if (and (map? value) (sequential? (:images value)))
+    (update value :images
+            #(mapv (fn [image]
+                     (select-keys image [:filename :subfolder :type])) %))
+    value))
+
 (defn- history-outputs [registry prompt execution]
   (into {}
         (map (fn [id]
                (let [values (get-in execution [:results id])
                      value (first values)]
-                 [id (if (map? value) value {:value value})])))
+                 [id (if (map? value) (public-output value) {:value value})])))
         (workflow/output-nodes registry prompt)))
 
 (declare schedule-pump!)
@@ -107,14 +162,14 @@
            (fn [state]
              (-> state (assoc :running nil)
                  (assoc-in [:history (:id entry)] history))))
-    (broadcast! server* "executing" {:node nil :prompt_id (:id entry)})
+    (emit! server* entry "executing" {:node nil :prompt_id (:id entry)})
     (if error
-      (broadcast! server* "execution_error"
-                  {:prompt_id (:id entry)
-                   :node_id failed-node
-                   :exception_message (or (.-message error) (str error))})
-      (broadcast! server* "execution_success"
-                  {:prompt_id (:id entry) :timestamp (.now js/Date)}))
+      (emit! server* entry "execution_error"
+             {:prompt_id (:id entry)
+              :node_id failed-node
+              :exception_message (or (.-message error) (str error))})
+      (emit! server* entry "execution_success"
+             {:prompt_id (:id entry) :timestamp (.now js/Date)}))
     (broadcast-status! server*)
     (schedule-pump! server*)
     nil))
@@ -126,17 +181,23 @@
     (let [entry (first (:pending @(:state server*)))]
       (swap! (:state server*)
              #(-> % (assoc :running entry) (update :pending subvec 1)))
-      (broadcast! server* "execution_start" {:prompt_id (:id entry)})
+      (emit! server* entry "execution_start" {:prompt_id (:id entry)})
       (broadcast-status! server*)
       (let [original-on-node-start (get-in server* [:ctx :on-node-start])
+            original-on-event (get-in server* [:ctx :on-event])
             active-node (atom nil)
             execution-ctx
-            (assoc (:ctx server*) :on-node-start
+            (assoc (:ctx server*)
+                   :on-node-start
                    (fn [event]
                      (reset! active-node (:node event))
                      (when original-on-node-start (original-on-node-start event))
-                     (broadcast! server* "executing"
-                                 {:node (:node event) :prompt_id (:id entry)})))
+                     (emit! server* entry "executing"
+                            {:node (:node event) :prompt_id (:id entry)}))
+                   :on-event
+                   (fn [event]
+                     (when original-on-event (original-on-event event))
+                     (emit-previews! server* entry event)))
             next (-> @(:tail server*)
                      (.catch (fn [_] nil))
                      (.then (fn [_]
@@ -150,7 +211,7 @@
     (js/setTimeout #(pump! server*) 0))
   nil)
 
-(defn- enqueue! [server* prompt extra-data]
+(defn- enqueue! [server* prompt extra-data client-id]
   (let [registry (get-in server* [:ctx :registry])
         validation (workflow/validate registry prompt)]
     (when-not (:valid? validation)
@@ -161,7 +222,8 @@
       (swap! (:state server*)
              (fn [{:keys [next-number] :as state}]
                (let [entry {:number next-number :id id :prompt prompt
-                            :extra-data (or extra-data {}) :outputs outputs}]
+                            :extra-data (or extra-data {}) :client-id client-id
+                            :outputs outputs}]
                  (reset! result entry)
                  (-> state (update :next-number inc)
                      (update :pending conj entry)))))
@@ -185,7 +247,8 @@
                                        (map (fn [[name value]] [(keyword name) value]))
                                        (get instance "inputs" {}))}]))
              prompt))
-     :extra-data (get body "extra_data")}))
+     :extra-data (get body "extra_data")
+     :client-id (get body "client_id")}))
 
 (defn- get-object-info [server* _ _]
   (js/Promise.resolve
@@ -215,8 +278,8 @@
 (defn- post-prompt [server* request _]
   (-> (.json request)
       (.then (fn [body]
-               (let [{:keys [prompt extra-data]} (parse-prompt-body body)
-                     entry (enqueue! server* prompt extra-data)]
+               (let [{:keys [prompt extra-data client-id]} (parse-prompt-body body)
+                     entry (enqueue! server* prompt extra-data client-id)]
                  (json-response 200 {:prompt_id (:id entry)
                                      :number (:number entry)
                                      :node_errors {}}))))
