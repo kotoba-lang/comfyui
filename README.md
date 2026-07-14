@@ -117,6 +117,32 @@ API format, /object_info, /prompt + /queue + /history) and the
 engine/inference split rationale. License is GPL-3.0, matching
 upstream ComfyUI.
 
+## Deno prompt server
+
+`comfyui.server` exposes the execution engine through a real Fetch/Deno HTTP
+listener. `POST /prompt` validates API-format workflows before assigning a UUID,
+then a serialized asynchronous pump runs Promise-returning Metal nodes without
+overlapping graph ownership. `GET /queue`, `GET /prompt`, `GET /history`,
+`GET /history/{prompt_id}`, `GET /object_info`, and
+`GET /object_info/{node_class}` use ComfyUI-compatible response shapes; invalid
+workflows return HTTP 400 with `node_errors`. `POST /queue` clears or removes
+pending prompt IDs. `/view` serves PNG artifacts only after canonical-path
+confinement to the configured output directory.
+
+```sh
+clojure -M:deno-server-verify
+deno run --allow-all target/deno-server-verify.cjs
+# /prompt → serialized execution → /history: passed
+# /queue and /object_info contracts: passed
+# confined /view artifact serving: passed
+```
+
+The live verifier submits two workflows concurrently to an ephemeral TCP port,
+proves peak graph concurrency remains one and completion order is stable, polls
+both UUID histories, checks node metadata and artifact bytes, and confirms an
+unknown node is rejected. WebSocket progress events, user/session isolation,
+authentication, and durable queue recovery remain production boundaries.
+
 ## Executable diffusion foundation
 
 `comfyui.nodes.diffusion-runtime/pack` replaces six contracts with real JVM
