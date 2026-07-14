@@ -103,7 +103,10 @@
               "I64" (js/Number (.getBigInt64 view (* index 8) true))))
           (range n))))
 
-(defn read-tensor [checkpoint backend tensor-name]
+(defn read-tensor
+  ([checkpoint backend tensor-name]
+   (read-tensor checkpoint backend tensor-name {}))
+  ([checkpoint backend tensor-name {:keys [preserve-f16?]}]
   (when @(:closed? checkpoint)
     (throw (ex-info "safetensors file is closed" {:path (:path checkpoint)})))
   (let [entry (get-in checkpoint [:tensors tensor-name])]
@@ -115,8 +118,11 @@
           upload (case dtype-name
                    "F32" (when-let [f (resolve 'num.deno-gpu/upload-byte-view)]
                            #(f backend % shape :f32))
-                   "F16" (when-let [f (resolve 'num.deno-gpu/upload-f16-as-f32-byte-view)]
-                           #(f backend % shape))
+                   "F16" (if preserve-f16?
+                           (when-let [f (resolve 'num.deno-gpu/upload-byte-view)]
+                             #(f backend % shape :f16))
+                           (when-let [f (resolve 'num.deno-gpu/upload-f16-as-f32-byte-view)]
+                             #(f backend % shape)))
                    "BF16" (when-let [f (resolve 'num.deno-gpu/upload-bf16-as-f32-byte-view)]
                             #(f backend % shape))
                    nil)]
@@ -132,8 +138,12 @@
           (swap! (:stats checkpoint)
                  #(-> % (update :decoded-uploads inc)
                       (update :decoded-elements + (nelems shape))))
-          (arr/from-vec backend (decode-values checkpoint entry) shape))))))
+          (arr/from-vec backend (decode-values checkpoint entry) shape
+                        (if (and preserve-f16? (= "F16" dtype-name)) :f16 :f32))))))))
 
-(defn component [checkpoint]
-  {:comfyui/read-tensor (fn [backend name]
-                          (read-tensor checkpoint backend name))})
+(defn component
+  ([checkpoint] (component checkpoint {}))
+  ([checkpoint {:keys [preserve-f16?] :as options}]
+   (cond-> {:comfyui/read-tensor (fn [backend name]
+                                  (read-tensor checkpoint backend name options))}
+     preserve-f16? (assoc :comfyui/dtype :f16))))

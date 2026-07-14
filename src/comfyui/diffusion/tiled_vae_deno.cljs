@@ -70,7 +70,8 @@
                        x (tile-origins width tile-size stride)] [y x])
          output (js/Float32Array. (* output-height output-width 3))
          weights (js/Float32Array. (* output-height output-width 3))
-         backend (:backend latent)]
+         backend (:backend latent)
+         decoder-dtype (or (-> decode meta :comfyui/dtype) :f32)]
      (-> (arr/->vec latent)
          (.then
           (fn [latent-values]
@@ -83,9 +84,11 @@
                         (arr/from-vec backend
                                       (tile-values latent-values channels height width
                                                    origin-y origin-x tile-size)
-                                      [1 channels tile-size tile-size])
+                                      [1 channels tile-size tile-size] decoder-dtype)
                         decoded (decode tile-latent)
-                        image (t/nchw-to-rgb-image decoded)]
+                        decoded-f32 (when (= :f16 (:dtype decoded))
+                                      (arr/cast decoded :f32))
+                        image (t/nchw-to-rgb-image (or decoded-f32 decoded))]
                     (-> (arr/->vec image)
                         (.then
                          (fn [values]
@@ -94,7 +97,8 @@
                                (blend-tile! output weights values
                                             (* origin-y scale) (* origin-x scale)
                                             tile-pixels output-height output-width feather))
-                             (arr/release-all! [tile-latent decoded image])
+                             (arr/release-all! (cond-> [tile-latent decoded image]
+                                                 decoded-f32 (conj decoded-f32)))
                              (when-not finite?
                                (throw (ex-info "VAE tile contains non-finite values"
                                                {:origin [origin-y origin-x]})))))))))))

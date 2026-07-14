@@ -124,7 +124,13 @@
                    (<= channels input-channels))
       (fail "take-channels requires NCHW and a valid channel count"
             {:shape shape :channels channels}))
-    (t/slice-axis value 1 0 channels)))
+    (if (= :f16 (:dtype value))
+      (let [input (arr/cast value :f32)
+            output (t/slice-axis input 1 0 channels)
+            result (arr/cast output :f16)]
+        (arr/release-all! [input output])
+        result)
+      (t/slice-axis value 1 0 channels))))
 
 (defn- pad-right-bottom [value]
   (let [shape (:shape value)]
@@ -306,7 +312,7 @@
       (arr/release! temporary))
     result))
 
-(defn- vae-attention [value tensor! layer]
+(defn- vae-attention-f32 [value tensor! layer]
   (let [[batch channels height width :as shape] (:shape value)
         normalized (t/group-norm-nchw
                     value (or (:groups layer) 32)
@@ -335,6 +341,33 @@
                        attended projected output]]
       (arr/release! temporary))
     result))
+
+(defn- vae-attention [value tensor! layer]
+  (if (= :f16 (:dtype value))
+    (let [input (arr/cast value :f32)
+          output (vae-attention-f32 input #(tensor! % :f32) layer)
+          result (arr/cast output :f16)]
+      (arr/release-all! [input output])
+      result)
+    (vae-attention-f32 value tensor! layer)))
+
+(defn- upsample [value scale-factor]
+  (if (= :f16 (:dtype value))
+    (let [input (arr/cast value :f32)
+          output (t/upsample-nearest2d input scale-factor)
+          result (arr/cast output :f16)]
+      (arr/release-all! [input output])
+      result)
+    (t/upsample-nearest2d value scale-factor)))
+
+(defn- scale [value factor]
+  (if (= :f16 (:dtype value))
+    (let [input (arr/cast value :f32)
+          output (t/scale input factor)
+          result (arr/cast output :f16)]
+      (arr/release-all! [input output])
+      result)
+    (t/scale value factor)))
 
 (defn- timestep-embedding [value timestep tensor! layer]
   (let [first-weight (tensor! (:first-weight layer))
@@ -418,12 +451,21 @@
   (let [cache (atom {})
         execution-layers (fuse-execution-layers layers)
         initial-saved-uses (saved-use-counts layers)
-        tensor! (fn [tensor-name]
-                  (when tensor-name
-                    (or (get @cache tensor-name)
-                        (let [tensor ((:comfyui/read-tensor component) backend tensor-name)]
-                          (swap! cache assoc tensor-name tensor)
-                          tensor))))]
+        tensor! (fn tensor-reader
+                  ([tensor-name] (tensor-reader tensor-name nil))
+                  ([tensor-name dtype]
+                   (when tensor-name
+                     (let [cache-key (if dtype [tensor-name dtype] tensor-name)]
+                       (or (get @cache cache-key)
+                           (let [source (or (get @cache tensor-name)
+                                            ((:comfyui/read-tensor component)
+                                             backend tensor-name))
+                                 _ (swap! cache assoc tensor-name source)
+                                 tensor (if (and dtype (not= dtype (:dtype source)))
+                                          (arr/cast source dtype)
+                                          source)]
+                             (swap! cache assoc cache-key tensor)
+                             tensor))))))]
     (with-meta
       (fn [sample timestep conditioning]
         (let [initial {:value sample :saved {} :embedding nil
@@ -458,7 +500,7 @@
                    :silu (assoc state :value (t/silu value))
 
                    :scale
-                   (assoc state :value (t/scale value (:factor layer)))
+                   (assoc state :value (scale value (:factor layer)))
 
                    :save
                    (assoc-in state [:saved (:name layer)] value)
@@ -481,7 +523,7 @@
 
                    :upsample
                    (assoc state :value
-                          (t/upsample-nearest2d value (or (:scale-factor layer) 2)))
+                          (upsample value (or (:scale-factor layer) 2)))
 
                    :add-conditioning
                    (let [condition (conditioning-tensor conditioning)]
@@ -592,7 +634,10 @@
   [component backend spec]
   (let [graph (compile-graph component backend
                              (assoc spec :release-intermediates? true) false)]
-    (with-meta (fn [latent] (graph latent 0 nil)) (meta graph))))
+    (with-meta (fn [latent] (graph latent 0 nil))
+      (cond-> (meta graph)
+        (:comfyui/dtype component)
+        (assoc :comfyui/dtype (:comfyui/dtype component))))))
 
 (defn compile-encoder
   "Compile a checkpoint-backed image-to-latent graph. Encoder specs retain

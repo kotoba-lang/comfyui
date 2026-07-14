@@ -595,18 +595,26 @@ larger tiles will require multidimensional dispatch and split bindings.
 
 The same node graph also consumes a streaming-converted uniform-F16 version of
 the official VAE. All 140 decoder tensors take the direct encoded upload path;
-checkpoint traffic falls from 197,960,796 to 98,980,398 bytes. On Apple M4 the
-F16-storage run emitted a 437,715-byte PNG in 30,396.862 ms with image sum
-354,451.556820, versus F32's 437,703 bytes, 29,275.810 ms, and
-354,463.468653. Comparing the final RGB8 images gives maximum error 1/255 and
-mean error 0.009303/255. Peak tracked memory remains 208,513,196 bytes because
-weights are expanded and activations/compute remain F32; this proves half-size
-checkpoint storage and ingest, not native mixed-precision arithmetic.
+checkpoint traffic falls from 197,960,796 to 98,980,398 bytes. Convolution,
+GroupNorm, SiLU, residual addition, and their weights and activations now remain
+in physical F16 Metal buffers. Unsupported attention, upsample, scale, slice,
+and final RGB conversion boundaries use explicit device-side F16/F32 casts;
+the ten cached F32 attention tensors make 150 cached buffers in total.
+
+On Apple M4 this mixed-precision run emitted a 437,936-byte 512×512 PNG with
+image sum 354,452.402975, returned to zero live buffers and bytes, and reduced
+peak tracked GPU memory from 208,513,196 to 111,117,376 bytes (46.7%). It took
+212,110.667 ms versus the F32 path's 29,275.810 ms, so the current scalar F16
+kernel path is substantially slower despite using less memory. The final RGB8
+comparison against F32 has maximum error 2/255 and mean error 0.0656/255. This
+is verified native mixed-precision execution, but it is not yet a performance win; tiled
+dispatch overhead, packed-kernel optimization, and eliminating cast boundaries
+remain necessary.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
 upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,
-additional VAE variants, mixed precision, and an installed real
+additional VAE variants, faster mixed precision, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 

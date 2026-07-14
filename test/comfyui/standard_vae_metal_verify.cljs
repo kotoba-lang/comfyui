@@ -32,9 +32,11 @@
          (fn [request]
            (let [backend (dg/backend request)
                  baseline (dg/backend-stats backend)
-                 decode (model/compile-decoder (safe/component checkpoint) backend spec)
+                 typed? (= "F16" checkpoint-dtype)
+                 component (safe/component checkpoint {:preserve-f16? typed?})
+                 decode (model/compile-decoder component backend spec)
                  cache (-> decode meta :comfyui/tensor-cache)
-                 vae (assoc (safe/component checkpoint)
+                 vae (assoc component
                             :comfyui/component :vae :comfyui/decode decode)
                  latent (arr/from-vec
                          backend
@@ -83,8 +85,9 @@
                                                   (png/dimensions bytes))
                                               (> (.-byteLength bytes) 10000)
                                               (or (not direct?)
-                                                  (= weights-loaded
-                                                     (:direct-uploads reader-stats)))
+                                                  (and (pos? (:direct-uploads reader-stats))
+                                                       (= (:direct-uploads reader-stats)
+                                                          (:window-reads reader-stats))))
                                               (= (:live-buffers baseline)
                                                  (:live-buffers stats))
                                               (= (:live-bytes baseline)
