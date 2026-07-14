@@ -86,9 +86,7 @@
                                                    origin-y origin-x tile-size)
                                       [1 channels tile-size tile-size] decoder-dtype)
                         decoded (decode tile-latent)
-                        decoded-f32 (when (= :f16 (:dtype decoded))
-                                      (arr/cast decoded :f32))
-                        image (t/nchw-to-rgb-image (or decoded-f32 decoded))]
+                        image (t/nchw-to-rgb-image decoded)]
                     (-> (arr/->vec image)
                         (.then
                          (fn [values]
@@ -97,8 +95,7 @@
                                (blend-tile! output weights values
                                             (* origin-y scale) (* origin-x scale)
                                             tile-pixels output-height output-width feather))
-                             (arr/release-all! (cond-> [tile-latent decoded image]
-                                                 decoded-f32 (conj decoded-f32)))
+                             (arr/release-all! [tile-latent decoded image])
                              (when-not finite?
                                (throw (ex-info "VAE tile contains non-finite values"
                                                {:origin [origin-y origin-x]})))))))))))

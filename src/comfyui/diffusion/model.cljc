@@ -349,13 +349,7 @@
   (t/upsample-nearest2d value scale-factor))
 
 (defn- scale [value factor]
-  (if (= :f16 (:dtype value))
-    (let [input (arr/cast value :f32)
-          output (t/scale input factor)
-          result (arr/cast output :f16)]
-      (arr/release-all! [input output])
-      result)
-    (t/scale value factor)))
+  (t/scale value factor))
 
 (defn- timestep-embedding [value timestep tensor! layer]
   (let [first-weight (tensor! (:first-weight layer))

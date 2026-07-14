@@ -598,7 +598,8 @@ the official VAE. All 140 decoder tensors take the direct encoded upload path;
 checkpoint traffic falls from 197,960,796 to 98,980,398 bytes. Convolution,
 GroupNorm, SiLU, residual addition, and their weights and activations now remain
 in physical F16 Metal buffers. Nearest upsample and channel slice now also stay
-in F16. Unsupported attention, scale, and final RGB conversion boundaries use explicit device-side F16/F32 casts;
+in F16. Scalar scale is native F16 and final RGB conversion unpacks directly
+to its required f32 image output. VAE attention is the remaining explicit F16/F32 boundary;
 the ten cached F32 attention tensors make 150 cached buffers in total.
 
 On Apple M4 this mixed-precision run emitted a 437,945-byte 512×512 PNG with
