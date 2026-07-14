@@ -2,7 +2,9 @@
   "Exercise production tiled VAE decode with a real four-block standard SD VAE."
   (:require [cljs.reader :as reader]
             [comfyui.diffusion.model :as model]
-            [comfyui.diffusion.tiled-vae-deno :as tiled-vae]
+            [comfyui.exec :as exec]
+            [comfyui.node :as node]
+            [comfyui.nodes.diffusion-runtime-deno :as runtime]
             [comfyui.png-deno :as png]
             [comfyui.safetensors-deno :as safe]
             [num.array :as arr]
@@ -11,12 +13,12 @@
 (def latent-size 64)
 (def output-size 512)
 
-(defn -main [& [spec-path checkpoint-path output-path]]
+(defn -main [& [spec-path checkpoint-path output-directory]]
   (when-not checkpoint-path
     (throw (ex-info "usage: SPEC CHECKPOINT [OUTPUT]" {})))
   (let [spec (reader/read-string (js/Deno.readTextFileSync spec-path))
         checkpoint (safe/open-file checkpoint-path)
-        output-path (or output-path "/tmp/comfyui-standard-vae-metal.png")]
+        output-directory (or output-directory "/tmp/comfyui-standard-vae-metal")]
     (-> (dg/request-device)
         (.then
          (fn [request]
@@ -24,30 +26,42 @@
                  baseline (dg/backend-stats backend)
                  decode (model/compile-decoder (safe/component checkpoint) backend spec)
                  cache (-> decode meta :comfyui/tensor-cache)
+                 vae (assoc (safe/component checkpoint)
+                            :comfyui/component :vae :comfyui/decode decode)
                  latent (arr/from-vec
                          backend
                          (mapv #(* 0.25 (Math/sin (* 0.01 %)))
                                (range (* 4 latent-size latent-size)))
                          [1 4 latent-size latent-size])
+                 registry (node/registry
+                           (runtime/pack {:backend backend
+                                          :output-directory output-directory}))
+                 workflow {"decode" {:class_type "VAEDecodeTiled"
+                                     :inputs {:samples {:samples latent} :vae vae
+                                              :tile_size 8 :overlap 2}}
+                           "save" {:class_type "SaveImage"
+                                   :inputs {:images ["decode" 0]
+                                            :filename_prefix "standard_vae"}}}
                  started (.now js/performance)]
-             (-> (tiled-vae/decode-tiled decode latent {:tile-size 8 :overlap 2})
+             (-> (exec/execute-async {:registry registry} workflow)
                  (.then
-                  (fn [image]
-                    (when-not (= [1 output-size output-size 3] (:shape image))
+                  (fn [execution]
+                    (let [image (get-in execution [:results "decode" 0])
+                          ui (get-in execution [:results "save" 0])
+                          path (get-in ui [:images 0 :path])]
+                    (when-not (and (= ["decode" "save"] (:executed execution))
+                                   (= [1 output-size output-size 3] (:shape image)))
                       (throw (ex-info "standard VAE image shape mismatch"
-                                      {:shape (:shape image)})))
+                                      {:shape (:shape image)
+                                       :executed (:executed execution)})))
                     (-> (arr/->vec image)
                         (.then (fn [values]
-                                 {:image image :values values
-                                  :png (png/encode-rgb values output-size output-size)})))))
+                                 {:image image :values values :path path}))))))
                  (.then
-                  (fn [{:keys [image values png]}]
-                    (-> png
-                        (.then
-                         (fn [bytes]
+                  (fn [{:keys [image values path]}]
+                    (let [bytes (js/Deno.readFileSync path)]
                            (when-not (every? #(js/Number.isFinite %) values)
                              (throw (ex-info "standard VAE produced non-finite pixels" {})))
-                           (js/Deno.writeFileSync output-path bytes)
                            (let [weights-loaded (count @cache)
                                  reader-stats (safe/reader-stats checkpoint)]
                              (arr/release-all! [latent image])
@@ -74,7 +88,7 @@
                                         "checkpoint-bytes" (:window-bytes reader-stats)
                                         "peak-bytes" (:peak-live-bytes stats)
                                         "elapsed-ms" (.toFixed elapsed 3)
-                                        "output" output-path))))))))))))
+                                        "output" path))))))))))
         (.catch (fn [error]
                   (safe/close-file! checkpoint)
                   (println "ERROR:" (or (.-stack error) (str error)))

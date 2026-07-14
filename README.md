@@ -578,18 +578,19 @@ clojure -M:export-vae-metal-spec vae-spec.edn \
   diffusion_pytorch_model.safetensors config.json
 clojure -M:standard-vae-metal-verify
 deno run --allow-all target/standard-vae-metal-verify.cjs \
-  vae-spec.edn diffusion_pytorch_model.safetensors output.png
+  vae-spec.edn diffusion_pytorch_model.safetensors output-directory
 ```
 
 WebGPU limits a single storage binding to 128 MiB and one dispatch dimension
 to 65,535 workgroups on this adapter, so a monolithic standard decode is
 intentionally rejected. The production `VAEDecodeTiled` node uses 121
 overlapping 8×8 latent tiles with feather blending, keeps the 140-weight cache
-shared across tiles, and emits a 437,703-byte 512×512 PNG in 31,647.513 ms. It
+shared across tiles, and emits a 437,703-byte 512×512 PNG in 29,350.735 ms. It
 reads 197,960,796 decoder bytes, peaks at 208,513,196 tracked GPU bytes, produces
 finite pixels, and returns to zero live buffers and bytes. The verifier calls
-the same runtime implementation rather than carrying a private tiler. This
-establishes a real standard-SD VAE path;
+the ordinary async executor with the API-format
+`VAEDecodeTiled → SaveImage` graph, not a private tiler or PNG writer. This
+establishes a real standard-SD VAE node-graph path;
 larger tiles will require multidimensional dispatch and split bindings.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
