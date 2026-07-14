@@ -56,23 +56,98 @@
   [ctx]
   {:ctx ctx
    :state (atom {:next-number 0 :pending [] :running nil :history {}})
+   :clients (atom {})
    :pump-scheduled? (atom false)
    :tail (atom (js/Promise.resolve nil))})
 
+(defn- queue-remaining [server*]
+  (let [{:keys [pending running]} @(:state server*)]
+    (+ (count pending) (if running 1 0))))
+
+(defn- send-message! [socket type data]
+  (when (= 1 (.-readyState socket))
+    (try
+      (.send socket (js/JSON.stringify (clj->js {:type type :data data})))
+      (catch :default _ nil))))
+
+(defn- broadcast! [server* type data]
+  (doseq [[_ socket] @(:clients server*)]
+    (send-message! socket type data))
+  nil)
+
+(defn- entry-sockets [server* entry]
+  (let [clients @(:clients server*)]
+    (if-let [client-id (:client-id entry)]
+      (if-let [socket (get clients client-id)] [socket] [])
+      (vals clients))))
+
+(defn- emit! [server* entry type data]
+  (doseq [socket (entry-sockets server* entry)]
+    (send-message! socket type data))
+  nil)
+
+(defn- preview-frame [png-bytes]
+  (let [frame (js/Uint8Array. (+ 8 (.-byteLength png-bytes)))
+        view (js/DataView. (.-buffer frame))]
+    (.setUint32 view 0 1 false)
+    (.setUint32 view 4 2 false)
+    (.set frame png-bytes 8)
+    frame))
+
+(defn- png-bytes? [bytes]
+  (and (<= 8 (.-byteLength bytes))
+       (= [137 80 78 71 13 10 26 10]
+          (mapv #(aget bytes %) (range 8)))))
+
+(defn- preview-file-frame [directory path]
+  (try
+    (when (string? path)
+      (let [candidate (js/Deno.realPathSync path)]
+        (when (and (.startsWith candidate (str directory "/"))
+                   (.-isFile (js/Deno.statSync candidate)))
+          (let [bytes (js/Deno.readFileSync candidate)]
+            (when (png-bytes? bytes) (preview-frame bytes))))))
+    (catch :default _ nil)))
+
+(defn- emit-previews! [server* entry event]
+  (try
+    (let [root (get-in server* [:ctx :output-directory])
+          images (->> (:output event) (filter map?) (mapcat :images))]
+      (when (and (seq root) (seq images))
+        (let [directory (js/Deno.realPathSync root)]
+          (doseq [{:keys [path]} images]
+            (when-let [frame (preview-file-frame directory path)]
+              (doseq [socket (entry-sockets server* entry)]
+                (when (= 1 (.-readyState socket))
+                  (.send socket frame))))))))
+    (catch :default _ nil))
+  nil)
+
+(defn- broadcast-status! [server*]
+  (broadcast! server* "status"
+              {:status {:exec_info {:queue_remaining (queue-remaining server*)}}}))
+
 (defn- queue-item [{:keys [number id prompt extra-data outputs]}]
   [number id prompt extra-data outputs])
+
+(defn- public-output [value]
+  (if (and (map? value) (sequential? (:images value)))
+    (update value :images
+            #(mapv (fn [image]
+                     (select-keys image [:filename :subfolder :type])) %))
+    value))
 
 (defn- history-outputs [registry prompt execution]
   (into {}
         (map (fn [id]
                (let [values (get-in execution [:results id])
                      value (first values)]
-                 [id (if (map? value) value {:value value})])))
+                 [id (if (map? value) (public-output value) {:value value})])))
         (workflow/output-nodes registry prompt)))
 
 (declare schedule-pump!)
 
-(defn- finish! [server* entry status execution error]
+(defn- finish! [server* entry status execution error failed-node]
   (let [registry (get-in server* [:ctx :registry])
         history {:prompt (queue-item entry)
                  :outputs (if execution
@@ -80,12 +155,22 @@
                  :status {:status_str status :completed true
                           :messages (if error [["execution_error"
                                                 {:prompt_id (:id entry)
+                                                 :node_id failed-node
                                                  :exception_message
                                                  (or (.-message error) (str error))}]] [])}}]
     (swap! (:state server*)
            (fn [state]
              (-> state (assoc :running nil)
                  (assoc-in [:history (:id entry)] history))))
+    (emit! server* entry "executing" {:node nil :prompt_id (:id entry)})
+    (if error
+      (emit! server* entry "execution_error"
+             {:prompt_id (:id entry)
+              :node_id failed-node
+              :exception_message (or (.-message error) (str error))})
+      (emit! server* entry "execution_success"
+             {:prompt_id (:id entry) :timestamp (.now js/Date)}))
+    (broadcast-status! server*)
     (schedule-pump! server*)
     nil))
 
@@ -96,12 +181,29 @@
     (let [entry (first (:pending @(:state server*)))]
       (swap! (:state server*)
              #(-> % (assoc :running entry) (update :pending subvec 1)))
-      (let [next (-> @(:tail server*)
+      (emit! server* entry "execution_start" {:prompt_id (:id entry)})
+      (broadcast-status! server*)
+      (let [original-on-node-start (get-in server* [:ctx :on-node-start])
+            original-on-event (get-in server* [:ctx :on-event])
+            active-node (atom nil)
+            execution-ctx
+            (assoc (:ctx server*)
+                   :on-node-start
+                   (fn [event]
+                     (reset! active-node (:node event))
+                     (when original-on-node-start (original-on-node-start event))
+                     (emit! server* entry "executing"
+                            {:node (:node event) :prompt_id (:id entry)}))
+                   :on-event
+                   (fn [event]
+                     (when original-on-event (original-on-event event))
+                     (emit-previews! server* entry event)))
+            next (-> @(:tail server*)
                      (.catch (fn [_] nil))
                      (.then (fn [_]
-                              (exec/execute-async (:ctx server*) (:prompt entry))))
-                     (.then #(finish! server* entry "success" % nil))
-                     (.catch #(finish! server* entry "error" nil %)))]
+                              (exec/execute-async execution-ctx (:prompt entry))))
+                     (.then #(finish! server* entry "success" % nil nil))
+                     (.catch #(finish! server* entry "error" nil % @active-node)))]
         (reset! (:tail server*) next)))))
 
 (defn schedule-pump! [server*]
@@ -109,7 +211,7 @@
     (js/setTimeout #(pump! server*) 0))
   nil)
 
-(defn- enqueue! [server* prompt extra-data]
+(defn- enqueue! [server* prompt extra-data client-id]
   (let [registry (get-in server* [:ctx :registry])
         validation (workflow/validate registry prompt)]
     (when-not (:valid? validation)
@@ -120,11 +222,13 @@
       (swap! (:state server*)
              (fn [{:keys [next-number] :as state}]
                (let [entry {:number next-number :id id :prompt prompt
-                            :extra-data (or extra-data {}) :outputs outputs}]
+                            :extra-data (or extra-data {}) :client-id client-id
+                            :outputs outputs}]
                  (reset! result entry)
                  (-> state (update :next-number inc)
                      (update :pending conj entry)))))
       (schedule-pump! server*)
+      (broadcast-status! server*)
       @result)))
 
 (defn- queue-body [state]
@@ -143,7 +247,8 @@
                                        (map (fn [[name value]] [(keyword name) value]))
                                        (get instance "inputs" {}))}]))
              prompt))
-     :extra-data (get body "extra_data")}))
+     :extra-data (get body "extra_data")
+     :client-id (get body "client_id")}))
 
 (defn- get-object-info [server* _ _]
   (js/Promise.resolve
@@ -154,9 +259,7 @@
 
 (defn- get-prompt-status [server* _ _]
   (js/Promise.resolve
-   (json-response 200 {:exec_info {:queue_remaining
-                                   (+ (count (:pending @(:state server*)))
-                                      (if (:running @(:state server*)) 1 0))}})))
+   (json-response 200 {:exec_info {:queue_remaining (queue-remaining server*)}})))
 
 (defn- post-queue [server* request _]
   (-> (.json request)
@@ -168,14 +271,15 @@
                   (fn [pending]
                     (if clear [] (vec (remove #(contains? deleted-ids (:id %))
                                                pending)))))
+           (broadcast-status! server*)
            (json-response 200 {}))))
       (.catch #(error-response 400 %))))
 
 (defn- post-prompt [server* request _]
   (-> (.json request)
       (.then (fn [body]
-               (let [{:keys [prompt extra-data]} (parse-prompt-body body)
-                     entry (enqueue! server* prompt extra-data)]
+               (let [{:keys [prompt extra-data client-id]} (parse-prompt-body body)
+                     entry (enqueue! server* prompt extra-data client-id)]
                  (json-response 200 {:prompt_id (:id entry)
                                      :number (:number entry)
                                      :node_errors {}}))))
@@ -192,6 +296,28 @@
    "POST /queue" post-queue
    "POST /prompt" post-prompt})
 
+(defn- websocket-response [server* request url]
+  (let [requested-id (.get (.-searchParams url) "clientId")
+        client-id (if (seq requested-id) requested-id (str (random-uuid)))
+        upgraded (js/Deno.upgradeWebSocket request)
+        socket (.-socket upgraded)
+        forget! (fn [_]
+                  (swap! (:clients server*)
+                         (fn [clients]
+                           (if (identical? socket (get clients client-id))
+                             (dissoc clients client-id)
+                             clients))))]
+    (set! (.-onopen socket)
+          (fn [_]
+            (swap! (:clients server*) assoc client-id socket)
+            (send-message! socket "status"
+                           {:status {:exec_info
+                                     {:queue_remaining (queue-remaining server*)}}
+                            :sid client-id})))
+    (set! (.-onclose socket) forget!)
+    (set! (.-onerror socket) forget!)
+    (.-response upgraded)))
+
 (defn handler [server*]
   (fn [request]
     (let [url (js/URL. (.-url request))
@@ -199,6 +325,8 @@
           method (.-method request)
           route (get exact-routes (str method " " path))]
       (cond
+        (and (= method "GET") (= path "/ws"))
+        (websocket-response server* request url)
         route (route server* request url)
         (and (= method "GET") (= path "/view"))
         (js/Promise.resolve (view-response server* url))

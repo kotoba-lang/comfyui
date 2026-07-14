@@ -56,6 +56,24 @@
     (is (= #{"1" "3"} (set executed)))
     (is (nil? (get results "2")))))
 
+(deftest node-start-precedes-node-failure
+  (let [starts (atom [])
+        completions (atom [])
+        failing {:type "Fail" :category "test"
+                 :inputs {} :outputs [{:name "value" :type "INT"}]
+                 :fn (fn [_] (throw (ex-info "intentional failure" {})))}
+        registry (doto (reg) (node/register! failing))]
+    (try
+      (exec/execute {:registry registry
+                     :on-node-start #(swap! starts conj %)
+                     :on-event #(swap! completions conj %)}
+                    {"failed" {:class_type "Fail" :inputs {}}})
+      (is false "failing node must throw")
+      (catch #?(:clj Exception :cljs :default) error
+        (is (= "intentional failure" (ex-message error)))))
+    (is (= [{:node "failed" :class "Fail" :cached? false}] @starts))
+    (is (empty? @completions))))
+
 (deftest datomic-cache-and-history
   (let [conn (db/create-conn exec/exec-schema)
         ctx {:registry (reg)
