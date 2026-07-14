@@ -23,7 +23,7 @@
 
 (defn -main
   [& [spec-path unet-path text-path vae-path output-directory
-      sampler-name scheduler-name mode]]
+      sampler-name scheduler-name mode resolution-value]]
   (when-not output-directory
     (throw (ex-info "usage: SPEC UNET TEXT VAE OUTPUT_DIRECTORY" {})))
   (let [{:keys [unet clip vae alphas positive negative]}
@@ -33,6 +33,14 @@
         sampler-name (or sampler-name "ddim")
         scheduler-name (or scheduler-name "normal")
         img2img? (= mode "img2img")
+        resolution (if resolution-value (js/Number resolution-value) 64)
+        _ (when-not (and (js/Number.isInteger resolution)
+                         (<= 64 resolution) (zero? (mod resolution 8)))
+            (throw (ex-info "resolution must be an integer multiple of 8 and >= 64"
+                            {:resolution resolution-value})))
+        ;; The public tiny fixture has one VAE upsample stage: Comfy's latent
+        ;; grid is resolution/8 and this decoder emits twice that size.
+        expected-pixels (quot resolution 4)
         input-name "metal_graph_input.png"
         input-path (str output-directory "/" input-name)
         input-values (mapv #(/ (mod (* % 37) 256) 255.0) (range (* 16 16 3)))
@@ -77,7 +85,7 @@
                   "4" (if img2img?
                         {:class_type "LoadImage" :inputs {:image input-name}}
                         {:class_type "EmptyLatentImage"
-                         :inputs {:width 64 :height 64 :batch_size 1}})
+                         :inputs {:width resolution :height resolution :batch_size 1}})
                   "8" (when img2img?
                         {:class_type "VAEEncode"
                          :inputs {:pixels ["4" 0] :vae ["1" 2]}})
@@ -123,7 +131,8 @@
                                          ["1" "4" "2" "3" "5" "6" "7"])
                                        (:executed execution))
                                     (= (if img2img? 8 7) (count @events))
-                                    (= [16 16] (png/dimensions png-bytes))
+                                    (= [expected-pixels expected-pixels]
+                                       (png/dimensions png-bytes))
                                     (> (.-byteLength png-bytes) 500)
                                     (or (not direct?)
                                         (every? pos? (map :direct-uploads reader-stats)))
@@ -131,7 +140,8 @@
                                     (= 2 (count (:history sample-result)))
                                     (every? #(js/Number.isFinite %) latent-values)
                                     (every? #(js/Number.isFinite %) image-values)
-                                    (or img2img? (not= "ddim" sampler-name)
+                                    (or img2img? (not= resolution 64)
+                                        (not= "ddim" sampler-name)
                                         (and (close? (if f16? 15.374797308671601
                                                          15.379568099975586)
                                                      (reduce + latent-values) 1.0e-3)
@@ -154,6 +164,8 @@
                                     "checkpoint-dtype" (if f16? "F16" "F32")
                                     "sampler" sampler-name "scheduler" scheduler-name
                                     "mode" (if img2img? "img2img" "txt2img")
+                                    "resolution" resolution
+                                    "png-dimensions" (str expected-pixels "x" expected-pixels)
                                     "elapsed-ms" (.toFixed elapsed-ms 3)
                                     "output" path)))))))))))
         (.catch (fn [error]

@@ -516,6 +516,10 @@ deno run --allow-all target/real-diffusers-graph-metal-verify.cjs \
   vae/model.safetensors output-directory ddim normal img2img
 ```
 
+The graph verifier also accepts a resolution after the mode. For example,
+`ddim normal txt2img 512` exercises a `[1,4,64,64]` latent instead of the
+default `[1,4,8,8]` fixture.
+
 Both F32 and fully converted F16 public checkpoints execute all seven nodes,
 match their independent numerical oracles, emit 852/848-byte PNGs, close the
 three lazy files, release conditioning/latent/image and all cached weights, and
@@ -551,6 +555,14 @@ runs measured 606.114–681.070 ms and emitted 849–852-byte PNGs; its extra
 midpoint UNet evaluations account for the higher interval. These use a warm OS
 file cache and are not evidence for 512×512 production throughput; full-size profiling
 and kernel fusion remain required.
+
+The resolution-variable gate now also runs the public tiny pipeline with a
+ComfyUI width/height request of 512. Because this intentionally small fixture's
+VAE has only one upsample stage, it emits 128×128 rather than a production SD
+VAE's 512×512. Nevertheless, the real workload grows from 256 to 16,384 latent
+elements: DDIM and DPM++ 2M/Karras emitted 46,274/46,157-byte PNGs in
+2,672.775/2,692.008 ms, peaked at 18,148,820 tracked GPU bytes, produced only
+finite values, and returned to zero live buffers and bytes.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
