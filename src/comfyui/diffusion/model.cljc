@@ -124,13 +124,7 @@
                    (<= channels input-channels))
       (fail "take-channels requires NCHW and a valid channel count"
             {:shape shape :channels channels}))
-    (if (= :f16 (:dtype value))
-      (let [input (arr/cast value :f32)
-            output (t/slice-axis input 1 0 channels)
-            result (arr/cast output :f16)]
-        (arr/release-all! [input output])
-        result)
-      (t/slice-axis value 1 0 channels))))
+    (t/slice-axis value 1 0 channels)))
 
 (defn- pad-right-bottom [value]
   (let [shape (:shape value)]
@@ -352,13 +346,7 @@
     (vae-attention-f32 value tensor! layer)))
 
 (defn- upsample [value scale-factor]
-  (if (= :f16 (:dtype value))
-    (let [input (arr/cast value :f32)
-          output (t/upsample-nearest2d input scale-factor)
-          result (arr/cast output :f16)]
-      (arr/release-all! [input output])
-      result)
-    (t/upsample-nearest2d value scale-factor)))
+  (t/upsample-nearest2d value scale-factor))
 
 (defn- scale [value factor]
   (if (= :f16 (:dtype value))
