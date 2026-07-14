@@ -26,6 +26,20 @@
     (doseq [checkpoint checkpoints] (safe/close-file! checkpoint))
     nil))
 
+(defn release-execution!
+  "Release every distinct public NDArray and model component retained by an
+  executor result. Nodes borrow their inputs, so the result graph remains valid
+  until this explicit lifecycle boundary."
+  [execution]
+  (let [values (tree-seq coll? seq (:results execution))
+        arrays (filter #(and (map? %) (:backend %) (:handle %)) values)
+        components (->> values
+                        (filter #(and (map? %) (:comfyui/component %)))
+                        distinct
+                        vec)]
+    (arr/release-all! arrays)
+    (release-components! components)))
+
 (defn- safe-prefix [value]
   (let [value (str/replace (or value "ComfyUI") #"[^A-Za-z0-9._-]" "_")]
     (if (seq value) value "ComfyUI")))
@@ -247,7 +261,9 @@
                       "euler_ancestral"
                       (scheduler/euler-ancestral-sample (assoc args :eta 1.0))
                       "dpmpp_2m" (scheduler/dpmpp-2m-sample args))]
-        (arr/release-all! [empty initial-noise initial-sample])
+        ;; `empty` is an upstream executor result and is borrowed by this node.
+        ;; Its owner releases it at the execution lifecycle boundary.
+        (arr/release-all! [initial-noise initial-sample])
         [{:samples (:sample sampled) :history (:history sampled)}]))}
    {:type "VAEDecode"
     :category "latent"

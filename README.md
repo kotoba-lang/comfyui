@@ -517,15 +517,18 @@ deno run --allow-all target/real-diffusers-graph-metal-verify.cjs \
 Both F32 and fully converted F16 public checkpoints execute all seven nodes,
 match their independent numerical oracles, emit 852/848-byte PNGs, close the
 three lazy files, release conditioning/latent/image and all cached weights, and
-finish at zero tracked GPU buffers. The measured F32 peak is 7,738,644 bytes.
+finish at zero tracked GPU buffers. The measured F32 peak is 7,739,668 bytes.
 The Deno `KSampler` shares the production scheduler implementations with the
 JVM runtime: `ddim`, `euler`, `euler_ancestral`, and `dpmpp_2m`, using `normal`,
 Karras rho-7, exponential, or polyexponential sigma schedules where valid,
 plus partial-denoise timestep
 slicing. Initial and ancestral noise remain an injected seeded host function.
-The real F32 seven-node graph was run for all seven valid sampler/scheduler
+The real F32 seven-node graph was run for all thirteen valid sampler/scheduler
 combinations; every run produced a finite 16×16 PNG and returned to zero live
-GPU buffers, with PNG sizes from 847 to 859 bytes. DDIM additionally retains its
+GPU buffers, with PNG sizes from 847 to 859 bytes. The execution lifecycle owns
+all node outputs until `release-execution!`; nodes borrow linked inputs, and the
+single release boundary deduplicates aliased GPU handles before closing model
+caches and checkpoint files. DDIM additionally retains its
 pinned PyTorch trajectory comparison; the scheduler's dedicated live Metal gate
 provides CPU parity for Euler/ancestral/DPM++ transitions.
 
@@ -538,8 +541,10 @@ median 480.645 ms). The independent JVM CPU pipeline took 55.765 s for the same
 fixed two-step graph, roughly 116× the Metal interval. F16 checkpoint expansion
 measured 557.774–601.661 ms (mean 581.062 ms): it halves checkpoint traffic but
 is slower for this tiny model because 458 separate half-expansion dispatches
-dominate. Single fresh-process measurements for the other six F32 combinations
-were 488.312–541.193 ms. These are tiny 16×16 output measurements with warm OS
+dominate. Single fresh-process measurements for the original other six F32
+combinations were 488.312–541.193 ms. The six exponential/polyexponential
+Metal runs measured 461.083–528.334 ms and emitted 847-byte PNGs. These are tiny
+16×16 output measurements with warm OS
 file cache, not evidence for 512×512 production throughput; full-size profiling
 and kernel fusion remain required.
 

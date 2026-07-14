@@ -99,12 +99,7 @@
                  (.then
                   (fn [execution]
                     (let [components (get-in execution [:results "1"])
-                          positive-result (get-in execution [:results "2" 0])
-                          negative-result (get-in execution [:results "3" 0])
                           sample-result (get-in execution [:results "5" 0])
-                          loaded-image (when img2img? (get-in execution [:results "4" 0]))
-                          loaded-mask (when img2img? (get-in execution [:results "4" 1]))
-                          encoded-latent (when img2img? (get-in execution [:results "8" 0]))
                           latent (:samples sample-result)
                           image (get-in execution [:results "6" 0])
                           ui (get-in execution [:results "7" 0])
@@ -114,11 +109,7 @@
                           png-bytes (js/Deno.readFileSync path)
                           reads (js/Promise.all
                                  #js [(arr/->vec latent) (arr/->vec image)])]
-                      (arr/release-all!
-                       [(:tensor positive-result) (:pooled positive-result)
-                        (:tensor negative-result) (:pooled negative-result)
-                        loaded-image loaded-mask encoded-latent latent image])
-                      (runtime/release-components! components)
+                      (runtime/release-execution! execution)
                       (.then
                        reads
                        (fn [values]
