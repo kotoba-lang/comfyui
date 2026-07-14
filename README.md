@@ -206,7 +206,10 @@ execution while retaining the upstream class names and wire types:
 - `VAEEncode` normalizes NHWC RGB `[0,1]` into NCHW `[-1,1]`, executes the
   checkpoint encoder, selects the diagonal-Gaussian posterior mean, and applies
   the model scaling factor. Its output connects directly to partial-denoise
-  `KSampler`; `VAEDecode` performs the inverse latent-to-image path. Encoder
+  `KSampler`; `VAEDecode` performs the inverse latent-to-image path.
+  `VAEDecodeTiled` exposes the same ComfyUI graph contract with configurable
+  tile size and overlap; Deno decodes one bounded tile at a time and feather
+  blends the NHWC result while sharing the lazy weight cache. Encoder
   downsampling reproduces Diffusers' asymmetric right/bottom zero padding
   before its stride-2 convolution. On an `ITensorBackend`, padding and posterior
   channel selection dispatch device-native kernels with no intermediate readback.
@@ -580,11 +583,13 @@ deno run --allow-all target/standard-vae-metal-verify.cjs \
 
 WebGPU limits a single storage binding to 128 MiB and one dispatch dimension
 to 65,535 workgroups on this adapter, so a monolithic standard decode is
-intentionally rejected. The gate uses 121 overlapping 8×8 latent tiles with
-feather blending, keeps the 140-weight cache shared across tiles, and emits a
-437,703-byte 512×512 PNG in 30,005.555 ms. It reads 197,960,796 decoder bytes,
-peaks at 208,447,660 tracked GPU bytes, produces finite pixels, and returns to
-zero live buffers and bytes. This establishes a real standard-SD VAE path;
+intentionally rejected. The production `VAEDecodeTiled` node uses 121
+overlapping 8×8 latent tiles with feather blending, keeps the 140-weight cache
+shared across tiles, and emits a 437,703-byte 512×512 PNG in 31,647.513 ms. It
+reads 197,960,796 decoder bytes, peaks at 208,513,196 tracked GPU bytes, produces
+finite pixels, and returns to zero live buffers and bytes. The verifier calls
+the same runtime implementation rather than carrying a private tiler. This
+establishes a real standard-SD VAE path;
 larger tiles will require multidimensional dispatch and split bindings.
 
 This is not yet a verified production SD/SDXL render: the automatic graph

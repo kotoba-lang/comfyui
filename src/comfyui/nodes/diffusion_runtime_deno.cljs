@@ -4,6 +4,7 @@
             [comfyui.clip.encoder :as clip]
             [comfyui.diffusion.model :as model]
             [comfyui.diffusion.scheduler :as scheduler]
+            [comfyui.diffusion.tiled-vae-deno :as tiled-vae]
             [comfyui.png-deno :as png]
             [comfyui.safetensors-deno :as safe]
             [num.array :as arr]
@@ -277,6 +278,19 @@
                 image (t/nchw-to-rgb-image decoded)]
             (arr/release! decoded)
             [image]))}
+   {:type "VAEDecodeTiled"
+    :category "latent"
+    :inputs {:samples {:type "LATENT"} :vae {:type "VAE"}
+             :tile_size {:type "INT" :default 8}
+             :overlap {:type "INT" :default 2}}
+    :outputs [{:name "IMAGE" :type "IMAGE"}]
+    :fn (fn [{:keys [samples vae tile_size overlap]}]
+          (let [latent (if (:samples samples) (:samples samples) samples)
+                decode (:comfyui/decode vae)]
+            (-> (tiled-vae/decode-tiled
+                 decode latent {:tile-size (or tile_size 8)
+                                :overlap (or overlap 2)})
+                (.then (fn [image] [image])))))}
    {:type "VAEEncode"
     :category "latent"
     :inputs {:pixels {:type "IMAGE"} :vae {:type "VAE"}}

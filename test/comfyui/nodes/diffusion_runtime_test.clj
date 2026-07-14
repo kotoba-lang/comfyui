@@ -274,8 +274,9 @@
                              :seed 77 :steps 2 :cfg 1.0
                              :sampler_name "dpmpp_2m" :scheduler "karras"
                              :denoise 0.5}}
-         "decode" {:class_type "VAEDecode"
-                    :inputs {:samples ["sample" 0] :vae vae}}}
+         "decode" {:class_type "VAEDecodeTiled"
+                    :inputs {:samples ["sample" 0] :vae vae
+                             :tile_size 8 :overlap 2}}}
         result (exec/execute {:registry registry :cache nil} workflow)
         mask (get-in result [:results "image" 1])
         image (get-in result [:results "decode" 0])]

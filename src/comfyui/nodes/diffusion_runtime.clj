@@ -425,6 +425,20 @@
                 (throw (ex-info "VAE decoder must return NCHW RGB"
                                 {:shape shape})))
               [(t/nchw-to-rgb-image decoded)])))}
+   {:type "VAEDecodeTiled"
+    :category "latent"
+    :inputs {:samples {:type "LATENT"}
+             :vae {:type "VAE"}
+             :tile_size {:type "INT" :default 8}
+             :overlap {:type "INT" :default 2}}
+    :outputs [{:name "IMAGE" :type "IMAGE"}]
+    :fn (fn [{:keys [samples vae]}]
+          ;; The JVM backend has no WebGPU binding limit; it preserves the
+          ;; public ComfyUI node contract while using the exact full decoder.
+          (let [latent (if (and (map? samples) (contains? samples :samples))
+                         (:samples samples) samples)
+                decoded ((:comfyui/decode vae) latent)]
+            [(t/nchw-to-rgb-image decoded)]))}
    {:type "VAEEncode"
     :category "latent"
     :inputs {:pixels {:type "IMAGE"}
