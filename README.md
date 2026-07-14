@@ -593,6 +593,16 @@ the ordinary async executor with the API-format
 establishes a real standard-SD VAE node-graph path;
 larger tiles will require multidimensional dispatch and split bindings.
 
+The same node graph also consumes a streaming-converted uniform-F16 version of
+the official VAE. All 140 decoder tensors take the direct encoded upload path;
+checkpoint traffic falls from 197,960,796 to 98,980,398 bytes. On Apple M4 the
+F16-storage run emitted a 437,715-byte PNG in 30,396.862 ms with image sum
+354,451.556820, versus F32's 437,703 bytes, 29,275.810 ms, and
+354,463.468653. Comparing the final RGB8 images gives maximum error 1/255 and
+mean error 0.009303/255. Peak tracked memory remains 208,513,196 bytes because
+weights are expanded and activations/compute remain F32; this proves half-size
+checkpoint storage and ingest, not native mixed-precision arithmetic.
+
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
 upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,

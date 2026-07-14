@@ -18,6 +18,14 @@
     (throw (ex-info "usage: SPEC CHECKPOINT [OUTPUT]" {})))
   (let [spec (reader/read-string (js/Deno.readTextFileSync spec-path))
         checkpoint (safe/open-file checkpoint-path)
+        floating #{#{"F16"} #{"F32"}}
+        checkpoint-dtypes (set (keep #(get % "dtype")
+                                     (vals (:tensors checkpoint))))
+        _ (when-not (contains? floating checkpoint-dtypes)
+            (throw (ex-info "standard VAE gate requires uniform F32 or F16 tensors"
+                            {:dtypes checkpoint-dtypes})))
+        checkpoint-dtype (first checkpoint-dtypes)
+        direct? (boolean (resolve 'num.deno-gpu/upload-byte-view))
         output-directory (or output-directory "/tmp/comfyui-standard-vae-metal")]
     (-> (dg/request-device)
         (.then
@@ -63,7 +71,8 @@
                            (when-not (every? #(js/Number.isFinite %) values)
                              (throw (ex-info "standard VAE produced non-finite pixels" {})))
                            (let [weights-loaded (count @cache)
-                                 reader-stats (safe/reader-stats checkpoint)]
+                                 reader-stats (safe/reader-stats checkpoint)
+                                 image-sum (reduce + values)]
                              (arr/release-all! [latent image])
                              (arr/release-all! (vals @cache))
                              (reset! cache {})
@@ -73,6 +82,9 @@
                                (when-not (and (= [output-size output-size]
                                                   (png/dimensions bytes))
                                               (> (.-byteLength bytes) 10000)
+                                              (or (not direct?)
+                                                  (= weights-loaded
+                                                     (:direct-uploads reader-stats)))
                                               (= (:live-buffers baseline)
                                                  (:live-buffers stats))
                                               (= (:live-bytes baseline)
@@ -84,8 +96,10 @@
                                         (dg/adapter-description request)
                                         "tiles" 121
                                         "png-bytes" (.-byteLength bytes)
+                                        "checkpoint-dtype" checkpoint-dtype
                                         "weights" weights-loaded
                                         "checkpoint-bytes" (:window-bytes reader-stats)
+                                        "image-sum" (.toFixed image-sum 6)
                                         "peak-bytes" (:peak-live-bytes stats)
                                         "elapsed-ms" (.toFixed elapsed 3)
                                         "output" path))))))))))
