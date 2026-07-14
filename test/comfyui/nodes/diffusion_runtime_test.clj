@@ -155,7 +155,9 @@
         dpmpp-karras-again (run "dpmpp_2m" "karras" 7)
         dpmpp-exponential (run "dpmpp_2m" "exponential" 7)
         dpmpp-exponential-again (run "dpmpp_2m" "exponential" 7)
-        dpmpp-polyexponential (run "dpmpp_2m" "polyexponential" 7)]
+        dpmpp-polyexponential (run "dpmpp_2m" "polyexponential" 7)
+        dpmpp-2s (run "dpmpp_2s_ancestral" "normal" 7)
+        dpmpp-2s-again (run "dpmpp_2s_ancestral" "normal" 7)]
     (is (= [1 1 1 1] (:shape ddim) (:shape euler) (:shape ancestral)
            (:shape dpmpp)))
     (is (not= (arr/->vec sample) (arr/->vec ddim)))
@@ -168,6 +170,8 @@
            (arr/->vec dpmpp-exponential-again)))
     (is (= (arr/->vec dpmpp-exponential)
            (arr/->vec dpmpp-polyexponential)))
+    (is (= (arr/->vec dpmpp-2s) (arr/->vec dpmpp-2s-again)))
+    (is (not= (arr/->vec dpmpp) (arr/->vec dpmpp-2s)))
     (is (not= (arr/->vec dpmpp) (arr/->vec dpmpp-karras)))
     (is (= (arr/->vec ddim) (arr/->vec ddim-again)))
     (is (not= (arr/->vec ddim) (arr/->vec ddim-other-seed)))))

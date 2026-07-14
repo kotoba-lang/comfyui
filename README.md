@@ -178,7 +178,9 @@ execution while retaining the upstream class names and wire types:
   discrete, or Euler ancestral. Euler converts cumulative alpha to sigma,
   scales model input, and integrates the epsilon ODE through final sigma zero;
   the ancestral variant splits each target into sigma-down plus seeded
-  sigma-up noise. DPM++ 2M follows k-diffusion's exponential multistep
+  sigma-up noise. DPM++ 2S ancestral performs the upstream log-sigma midpoint
+  denoiser evaluation before adding seeded sigma-up noise. DPM++ 2M follows
+  k-diffusion's exponential multistep
   recurrence, retains the previous denoised estimate for its second-order
   correction, and handles terminal sigma zero as an exact denoised-x0 step.
   Euler and DPM++ additionally accept Karras rho-7, exponential, and
@@ -186,7 +188,7 @@ execution while retaining the upstream class names and wire types:
   sigma values are mapped back to fractional model timesteps by interpolation in
   log-sigma space, matching k-diffusion's discrete epsilon-model wrapper.
   The current executable subset is `ddim` + `normal`, or
-  `euler|euler_ancestral|dpmpp_2m` +
+  `euler|euler_ancestral|dpmpp_2s_ancestral|dpmpp_2m` +
   `normal|karras|exponential|polyexponential`. Denoise values in `(0,1]`
   are supported: the runtime builds `floor(steps/denoise)` levels and retains
   the final requested step interval, matching ComfyUI's partial-denoise schedule
@@ -519,11 +521,11 @@ match their independent numerical oracles, emit 852/848-byte PNGs, close the
 three lazy files, release conditioning/latent/image and all cached weights, and
 finish at zero tracked GPU buffers. The measured F32 peak is 7,739,668 bytes.
 The Deno `KSampler` shares the production scheduler implementations with the
-JVM runtime: `ddim`, `euler`, `euler_ancestral`, and `dpmpp_2m`, using `normal`,
-Karras rho-7, exponential, or polyexponential sigma schedules where valid,
-plus partial-denoise timestep
+JVM runtime: `ddim`, `euler`, `euler_ancestral`, `dpmpp_2s_ancestral`, and
+`dpmpp_2m`, using `normal`, Karras rho-7, exponential, or polyexponential sigma
+schedules where valid, plus partial-denoise timestep
 slicing. Initial and ancestral noise remain an injected seeded host function.
-The real F32 seven-node graph was run for all thirteen valid sampler/scheduler
+The real F32 seven-node graph was run for all seventeen valid sampler/scheduler
 combinations; every run produced a finite 16×16 PNG and returned to zero live
 GPU buffers, with PNG sizes from 847 to 859 bytes. The execution lifecycle owns
 all node outputs until `release-execution!`; nodes borrow linked inputs, and the
@@ -544,8 +546,10 @@ is slower for this tiny model because 458 separate half-expansion dispatches
 dominate. Single fresh-process measurements for the original other six F32
 combinations were 488.312–541.193 ms. The six exponential/polyexponential
 Metal runs measured 461.083–528.334 ms and emitted 847-byte PNGs. These are tiny
-16×16 output measurements with warm OS
-file cache, not evidence for 512×512 production throughput; full-size profiling
+16×16 output measurements with warm OS cache. DPM++ 2S ancestral's four schedule
+runs measured 606.114–681.070 ms and emitted 849–852-byte PNGs; its extra
+midpoint UNet evaluations account for the higher interval. These use a warm OS
+file cache and are not evidence for 512×512 production throughput; full-size profiling
 and kernel fusion remain required.
 
 This is not yet a verified production SD/SDXL render: the automatic graph

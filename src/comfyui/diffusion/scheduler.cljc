@@ -305,6 +305,21 @@
       (mapv double sigmas))
     (conj (mapv #(alpha->sigma (double (nth alphas %))) timesteps) 0.0)))
 
+(defn- ancestral-step [sigma sigma-next eta]
+  (let [sigma-up (if (zero? sigma-next)
+                   0.0
+                   (min sigma-next
+                        (* eta
+                           (Math/sqrt
+                            (max 0.0
+                                 (/ (* sigma-next sigma-next
+                                       (- (* sigma sigma)
+                                          (* sigma-next sigma-next)))
+                                    (* sigma sigma)))))))]
+    {:sigma-up sigma-up
+     :sigma-down (Math/sqrt (max 0.0 (- (* sigma-next sigma-next)
+                                          (* sigma-up sigma-up))))}))
+
 (defn euler-sample
   "Classifier-free-guided Euler discrete sampling for epsilon-prediction
   models. Model input is scaled by `1/sqrt(sigma^2+1)`; each step integrates
@@ -363,18 +378,7 @@
             unconditional (denoise-fn model-input timestep negative)
             conditional (denoise-fn model-input timestep positive)
             epsilon (classifier-free-guidance unconditional conditional cfg)
-            sigma-up (if (zero? sigma-next)
-                       0.0
-                       (min sigma-next
-                            (* eta
-                               (Math/sqrt
-                                (max 0.0
-                                     (/ (* sigma-next sigma-next
-                                           (- (* sigma sigma)
-                                              (* sigma-next sigma-next)))
-                                        (* sigma sigma)))))))
-            sigma-down (Math/sqrt (max 0.0 (- (* sigma-next sigma-next)
-                                                (* sigma-up sigma-up))))
+            {:keys [sigma-up sigma-down]} (ancestral-step sigma sigma-next eta)
             derivative-step (scale epsilon (- sigma-down sigma))
             mean (t/add current derivative-step)
             noise (when (pos? sigma-up)
@@ -396,6 +400,77 @@
         (when-not retain-step-tensors?
           (release-except! [epsilon] protected)
           (when current-owned? (release-except! [current] [sample next-sample])))
+        (recur next-sample true (next remaining) (next sigma-remaining)
+               (conj history audited)))
+      {:sample current :history history})))
+
+(defn dpmpp-2s-ancestral-sample
+  "k-diffusion DPM-Solver++(2S) ancestral sampling for epsilon models. Each
+  non-terminal transition evaluates the denoiser at its log-sigma midpoint,
+  advances to sigma-down with that second x0 estimate, then adds seeded
+  sigma-up noise."
+  [{:keys [sample alphas timesteps sigmas denoise-fn positive negative cfg eta
+           noise-fn on-step retain-step-tensors?]
+    :or {cfg 1.0 eta 1.0 retain-step-tensors? false}}]
+  (when-not (and sample (seq alphas) (seq timesteps) (fn? denoise-fn)
+                 (<= 0.0 eta))
+    (throw (ex-info "DPM++ 2S ancestral sampler received invalid arguments"
+                    {:eta eta})))
+  (loop [current sample current-owned? false remaining (seq timesteps)
+         sigma-remaining (seq (resolve-sigmas alphas timesteps sigmas)) history []]
+    (if-let [timestep (first remaining)]
+      (let [sigma (first sigma-remaining)
+            sigma-next (second sigma-remaining)
+            {:keys [sigma-up sigma-down]} (ancestral-step sigma sigma-next eta)
+            model-input (scale current (/ 1.0 (Math/sqrt (+ 1.0 (* sigma sigma)))))
+            unconditional (denoise-fn model-input timestep negative)
+            conditional (denoise-fn model-input timestep positive)
+            epsilon (classifier-free-guidance unconditional conditional cfg)
+            epsilon-at-sigma (scale epsilon sigma)
+            denoised (t/sub current epsilon-at-sigma)
+            midpoint? (pos? sigma-down)
+            h (when midpoint? (- (Math/log sigma) (Math/log sigma-down)))
+            sigma-mid (when midpoint? (Math/exp (- (+ (- (Math/log sigma)) (* 0.5 h)))))
+            current-mid (when midpoint? (scale current (/ sigma-mid sigma)))
+            denoised-mid (when midpoint? (scale denoised (- (Math/expm1 (* -0.5 h)))))
+            x-mid (when midpoint? (t/add current-mid denoised-mid))
+            midpoint-timestep (when midpoint? (sigma->timestep alphas sigma-mid))
+            midpoint-input (when midpoint?
+                             (scale x-mid (/ 1.0 (Math/sqrt (+ 1.0 (* sigma-mid sigma-mid))))))
+            unconditional-mid (when midpoint?
+                                (denoise-fn midpoint-input midpoint-timestep negative))
+            conditional-mid (when midpoint?
+                              (denoise-fn midpoint-input midpoint-timestep positive))
+            epsilon-mid (when midpoint?
+                          (classifier-free-guidance unconditional-mid conditional-mid cfg))
+            epsilon-mid-scaled (when midpoint? (scale epsilon-mid sigma-mid))
+            denoised-2 (when midpoint? (t/sub x-mid epsilon-mid-scaled))
+            base-current (when midpoint? (scale current (/ sigma-down sigma)))
+            base-denoised (when midpoint?
+                            (scale denoised-2 (- (Math/expm1 (- h)))))
+            mean (if midpoint? (t/add base-current base-denoised) denoised)
+            noise (when (pos? sigma-up)
+                    (when-not noise-fn
+                      (throw (ex-info "DPM++ 2S ancestral sampling requires noise-fn" {})))
+                    (noise-fn (:shape current) timestep))
+            noise-step (when noise (scale noise sigma-up))
+            next-sample (if noise-step (t/add mean noise-step) mean)
+            event {:timestep timestep :sigma sigma :sigma-next sigma-next
+                   :sigma-up sigma-up :sigma-down sigma-down
+                   :midpoint-sigma sigma-mid :order (if midpoint? 2 1)}
+            audited (audit-event event retain-step-tensors?)
+            protected (concat [sample current next-sample]
+                              (conditioning-tensors positive)
+                              (conditioning-tensors negative))]
+        (when on-step (on-step audited))
+        (release-except!
+         [model-input unconditional conditional epsilon epsilon-at-sigma denoised
+          current-mid denoised-mid x-mid midpoint-input unconditional-mid conditional-mid
+          epsilon-mid epsilon-mid-scaled denoised-2 base-current base-denoised noise noise-step]
+         protected)
+        (when-not (same-handle? mean next-sample) (arr/release! mean))
+        (when (and current-owned? (not retain-step-tensors?))
+          (release-except! [current] [sample next-sample]))
         (recur next-sample true (next remaining) (next sigma-remaining)
                (conj history audited)))
       {:sample current :history history})))

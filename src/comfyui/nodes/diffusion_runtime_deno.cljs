@@ -207,7 +207,8 @@
     :fn
     (fn [{:keys [model positive negative latent_image seed steps cfg
                  sampler_name scheduler denoise]}]
-      (when-not (and (contains? #{"ddim" "euler" "euler_ancestral" "dpmpp_2m"}
+      (when-not (and (contains? #{"ddim" "euler" "euler_ancestral" "dpmpp_2m"
+                                  "dpmpp_2s_ancestral"}
                                 sampler_name)
                      (contains? #{"normal" "karras" "exponential"
                                   "polyexponential"} scheduler)
@@ -260,6 +261,8 @@
                       "euler" (scheduler/euler-sample args)
                       "euler_ancestral"
                       (scheduler/euler-ancestral-sample (assoc args :eta 1.0))
+                      "dpmpp_2s_ancestral"
+                      (scheduler/dpmpp-2s-ancestral-sample (assoc args :eta 1.0))
                       "dpmpp_2m" (scheduler/dpmpp-2m-sample args))]
         ;; `empty` is an upstream executor result and is borrowed by this node.
         ;; Its owner releases it at the execution lifecycle boundary.
