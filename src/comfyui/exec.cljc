@@ -121,6 +121,7 @@
         :cache (mem-cache | datomic-cache | nil = no caching)
         :history-conn conn      ; optional — record run datoms
         :db-api langchain.db/api
+        :on-node-start (fn [event]) ; fires before invoking a node
         :on-event (fn [event])} ; {:node .. :class .. :cached? ..}
 
   opts: {:targets [node-ids]}   ; default: nodes with :output-node?
@@ -130,7 +131,7 @@
            :executed [node-ids] :cached [node-ids]
            :run-id n-or-nil}"
   ([ctx workflow] (execute ctx workflow {}))
-  ([{:keys [registry cache history-conn db-api on-event]
+  ([{:keys [registry cache history-conn db-api on-node-start on-event]
      :or {db-api db/api}}
     workflow
     {:keys [targets]}]
@@ -148,6 +149,9 @@
                       t (node/get-type registry class_type)
                       k (cache-key workflow keys id)
                       hit (when cache (-cache-get cache k))
+                      _ (when on-node-start
+                          (on-node-start {:node id :class class_type
+                                          :cached? (some? hit)}))
                       outputs
                       (or hit
                           (let [;; resolve links against upstream results,
@@ -207,7 +211,7 @@
        Returns `Promise<{:results .. :executed .. :cached .. :run-id ..}>`
        (same shape `execute` returns synchronously)."
        ([ctx workflow] (execute-async ctx workflow {}))
-       ([{:keys [registry cache history-conn db-api on-event]
+       ([{:keys [registry cache history-conn db-api on-node-start on-event]
           :or {db-api db/api}}
          workflow
          {:keys [targets]}]
@@ -227,6 +231,9 @@
                              t (node/get-type registry class_type)
                              k (cache-key workflow keys id)
                              hit (when cache (-cache-get cache k))]
+                         (when on-node-start
+                           (on-node-start {:node id :class class_type
+                                           :cached? (some? hit)}))
                          (if hit
                            (do (when on-event (on-event {:node id :class class_type :cached? true}))
                                (->p {:keys (assoc keys id k)

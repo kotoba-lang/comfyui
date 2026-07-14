@@ -127,7 +127,10 @@ overlapping graph ownership. `GET /queue`, `GET /prompt`, `GET /history`,
 `GET /object_info/{node_class}` use ComfyUI-compatible response shapes; invalid
 workflows return HTTP 400 with `node_errors`. `POST /queue` clears or removes
 pending prompt IDs. `/view` serves PNG artifacts only after canonical-path
-confinement to the configured output directory.
+confinement to the configured output directory. `GET /ws?clientId=...` upgrades
+to WebSocket and emits ComfyUI-style `status`, `execution_start`, `executing`,
+`execution_success`, and `execution_error` messages from the same serialized
+queue and real node-execution events used by the HTTP history.
 
 ```sh
 clojure -M:deno-server-verify
@@ -135,13 +138,17 @@ deno run --allow-all target/deno-server-verify.cjs
 # /prompt → serialized execution → /history: passed
 # /queue and /object_info contracts: passed
 # confined /view artifact serving: passed
+# WebSocket status and execution events: passed
 ```
 
-The live verifier submits two workflows concurrently to an ephemeral TCP port,
-proves peak graph concurrency remains one and completion order is stable, polls
-both UUID histories, checks node metadata and artifact bytes, and confirms an
-unknown node is rejected. WebSocket progress events, user/session isolation,
-authentication, and durable queue recovery remain production boundaries.
+The live verifier submits two successful workflows and one intentionally failing
+workflow concurrently to an ephemeral TCP port, proves peak graph concurrency
+remains one and completion order is stable, polls all UUID histories, checks node
+metadata and artifact bytes, and confirms an unknown node is rejected. It also
+opens a real WebSocket before submission and proves prompt IDs, node order,
+success/error notifications (including the failed node ID), and final queue depth
+agree with HTTP history. Per-user execution isolation, authentication, binary
+preview frames, and durable queue recovery remain production boundaries.
 
 ## Executable diffusion foundation
 
