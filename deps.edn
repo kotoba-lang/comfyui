@@ -60,6 +60,15 @@
   :convert-safetensors-f16
   {:extra-paths ["test"]
    :main-opts ["-m" "comfyui.convert-safetensors-f16"]}
+  :export-vae-metal-spec
+  {:extra-paths ["test"]
+   :main-opts ["-m" "comfyui.export-vae-metal-spec"]}
+  :standard-vae-metal-verify
+  {:extra-paths ["test"]
+   :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+   :main-opts ["-m" "cljs.main"
+               "-co" "{:optimizations :simple :target :nodejs :main comfyui.standard-vae-metal-verify :output-to \"target/standard-vae-metal-verify.cjs\"}"
+               "-c" "comfyui.standard-vae-metal-verify"]}
   :real-diffusers-metal-verify
   {:extra-paths ["test"]
    :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}

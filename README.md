@@ -564,6 +564,29 @@ elements: DDIM and DPM++ 2M/Karras emitted 46,274/46,157-byte PNGs in
 2,672.775/2,692.008 ms, peaked at 18,148,820 tracked GPU bytes, produced only
 finite values, and returned to zero live buffers and bytes.
 
+A separate large-model gate now uses Stability AI's public 319 MiB
+`sd-vae-ft-mse` Diffusers safetensors instead of the tiny fixture. The JVM
+exporter infers its four decoder blocks, 140 decoder tensors are then loaded
+directly and lazily by Deno, and a real 64×64 latent is decoded to a 512×512
+PNG on Apple Metal:
+
+```sh
+clojure -M:export-vae-metal-spec vae-spec.edn \
+  diffusion_pytorch_model.safetensors config.json
+clojure -M:standard-vae-metal-verify
+deno run --allow-all target/standard-vae-metal-verify.cjs \
+  vae-spec.edn diffusion_pytorch_model.safetensors output.png
+```
+
+WebGPU limits a single storage binding to 128 MiB and one dispatch dimension
+to 65,535 workgroups on this adapter, so a monolithic standard decode is
+intentionally rejected. The gate uses 121 overlapping 8×8 latent tiles with
+feather blending, keeps the 140-weight cache shared across tiles, and emits a
+437,703-byte 512×512 PNG in 30,005.555 ms. It reads 197,960,796 decoder bytes,
+peaks at 208,447,660 tracked GPU bytes, produces finite pixels, and returns to
+zero live buffers and bytes. This establishes a real standard-SD VAE path;
+larger tiles will require multidimensional dispatch and split bindings.
+
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
 upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,
