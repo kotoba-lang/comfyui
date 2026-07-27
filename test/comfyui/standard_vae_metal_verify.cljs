@@ -42,8 +42,10 @@
          (fn [request]
            (let [backend (dg/backend request)
                  baseline (dg/backend-stats backend)
-                 typed? (= "F16" checkpoint-dtype)
-                 component (safe/component checkpoint {:preserve-f16? typed?})
+                 ;; safetensors-deno/component takes the checkpoint only; F16
+                 ;; and BF16 tensors are upconverted to F32 on upload, so there
+                 ;; is no preserve-f16 option to pass here.
+                 component (safe/component checkpoint)
                  decode (model/compile-decoder component backend spec)
                  cache (-> decode meta :comfyui/tensor-cache)
                  vae (assoc component
