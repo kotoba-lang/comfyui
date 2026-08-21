@@ -29,7 +29,9 @@
          :exec-fn cognitect.test-runner.api/test}
   ;; local checkout for workspace development (orgs/kotoba-lang/*)
   :dev {:override-deps {io.github.kotoba-lang/langchain
-                        {:local/root "../langchain"}}}
+                        {:local/root "../langchain"}
+                        io.github.kotoba-lang/num
+                        {:local/root "../num"}}}
   ;; ADR-2607131500 follow-up: comfyui.nodes.toy-diffusion's Metal-backed
   ;; twin (ToyDiffusionStepMetal / execute-async), on real Metal, cross-
   ;; checked against the CPU-sync ToyDiffusionStep node's result.
@@ -60,6 +62,15 @@
   :convert-safetensors-f16
   {:extra-paths ["test"]
    :main-opts ["-m" "comfyui.convert-safetensors-f16"]}
+  :export-vae-metal-spec
+  {:extra-paths ["test"]
+   :main-opts ["-m" "comfyui.export-vae-metal-spec"]}
+  :standard-vae-metal-verify
+  {:extra-paths ["test"]
+   :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+   :main-opts ["-m" "cljs.main"
+               "-co" "{:optimizations :simple :target :nodejs :main comfyui.standard-vae-metal-verify :output-to \"target/standard-vae-metal-verify.cjs\"}"
+               "-c" "comfyui.standard-vae-metal-verify"]}
   :real-diffusers-metal-verify
   {:extra-paths ["test"]
    :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}

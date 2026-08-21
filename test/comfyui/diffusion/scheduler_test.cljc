@@ -146,6 +146,18 @@
     (is (approx? 2.0 (scheduler/sigma->timestep
                       alphas (scheduler/alpha->sigma 0.1))))))
 
+(deftest exponential-and-polyexponential-match-k-diffusion-reference
+  (let [exponential (scheduler/exponential-sigmas 3 0.1 10.0)
+        poly (scheduler/polyexponential-sigmas 3 0.1 10.0 2.0)]
+    (is (every? true? (map approx? [10.0 1.0 0.1 0.0] exponential)))
+    (is (every? true?
+                (map approx? [10.0 0.31622776601683794 0.1 0.0] poly)))
+    (is (= exponential (scheduler/polyexponential-sigmas 3 0.1 10.0)))
+    (is (= exponential (scheduler/sigma-schedule "exponential" 3 0.1 10.0)))
+    (is (= poly (scheduler/polyexponential-sigmas 3 0.1 10.0 2.0)))
+    (is (apply > (butlast exponential)))
+    (is (apply > (butlast poly)))))
+
 (deftest dpmpp-2m-consumes-explicit-karras-sigmas-and-fractional-timesteps
   (let [calls (atom []) events (atom [])
         alphas [0.92 0.8 0.6 0.4]
@@ -164,3 +176,24 @@
     (is (= sigmas (conj (mapv :sigma @events) 0.0)))
     (is (= (vec (mapcat #(vector % %) timesteps)) @calls))
     (is (= [1] (:shape (:sample result))))))
+
+(deftest dpmpp-2s-ancestral-matches-k-diffusion-two-stage-equation
+  (let [calls (atom []) events (atom [])
+        result (scheduler/dpmpp-2s-ancestral-sample
+                {:sample (arr/from-vec backend [1.0] [1])
+                 :alphas [0.6097560975609756 0.2]
+                 :timesteps [1.0 0.0] :sigmas [2.0 0.8 0.0]
+                 :negative (arr/from-vec backend [0.1] [1])
+                 :positive (arr/from-vec backend [0.3] [1]) :cfg 2.0 :eta 1.0
+                 :denoise-fn (fn [_ timestep conditioning]
+                               (swap! calls conj timestep)
+                               conditioning)
+                 :noise-fn (fn [shape _] (arr/from-vec backend [0.25] shape))
+                 :on-step #(swap! events conj %)})]
+    (is (= 6 (count @calls)))
+    (is (every? true? (map approx? [1.0 1.0 0.0 0.0 0.0 0.0] @calls)))
+    (is (approx? 0.7332121111929345 (:sigma-up (first @events))))
+    (is (approx? 0.32 (:sigma-down (first @events))))
+    (is (= [2 1] (mapv :order @events)))
+    (is (approx? -0.056696972201766394
+                 (first (arr/->vec (:sample result)))))))

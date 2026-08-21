@@ -178,14 +178,18 @@ execution while retaining the upstream class names and wire types:
   discrete, or Euler ancestral. Euler converts cumulative alpha to sigma,
   scales model input, and integrates the epsilon ODE through final sigma zero;
   the ancestral variant splits each target into sigma-down plus seeded
-  sigma-up noise. DPM++ 2M follows k-diffusion's exponential multistep
+  sigma-up noise. DPM++ 2S ancestral performs the upstream log-sigma midpoint
+  denoiser evaluation before adding seeded sigma-up noise. DPM++ 2M follows
+  k-diffusion's exponential multistep
   recurrence, retains the previous denoised estimate for its second-order
   correction, and handles terminal sigma zero as an exact denoised-x0 step.
-  Euler and DPM++ additionally accept the Karras rho-7 sigma schedule. Continuous
+  Euler and DPM++ additionally accept Karras rho-7, exponential, and
+  polyexponential sigma schedules. Continuous
   sigma values are mapped back to fractional model timesteps by interpolation in
   log-sigma space, matching k-diffusion's discrete epsilon-model wrapper.
   The current executable subset is `ddim` + `normal`, or
-  `euler|euler_ancestral|dpmpp_2m` + `normal|karras`. Denoise values in `(0,1]`
+  `euler|euler_ancestral|dpmpp_2s_ancestral|dpmpp_2m` +
+  `normal|karras|exponential|polyexponential`. Denoise values in `(0,1]`
   are supported: the runtime builds `floor(steps/denoise)` levels and retains
   the final requested step interval, matching ComfyUI's partial-denoise schedule
   slicing. DDIM noises an existing latent in alpha space for partial denoise;
@@ -202,7 +206,10 @@ execution while retaining the upstream class names and wire types:
 - `VAEEncode` normalizes NHWC RGB `[0,1]` into NCHW `[-1,1]`, executes the
   checkpoint encoder, selects the diagonal-Gaussian posterior mean, and applies
   the model scaling factor. Its output connects directly to partial-denoise
-  `KSampler`; `VAEDecode` performs the inverse latent-to-image path. Encoder
+  `KSampler`; `VAEDecode` performs the inverse latent-to-image path.
+  `VAEDecodeTiled` exposes the same ComfyUI graph contract with configurable
+  tile size and overlap; Deno decodes one bounded tile at a time and feather
+  blends the NHWC result while sharing the lazy weight cache. Encoder
   downsampling reproduces Diffusers' asymmetric right/bottom zero padding
   before its stride-2 convolution. On an `ITensorBackend`, padding and posterior
   channel selection dispatch device-native kernels with no intermediate readback.
@@ -512,17 +519,25 @@ deno run --allow-all target/real-diffusers-graph-metal-verify.cjs \
   vae/model.safetensors output-directory ddim normal img2img
 ```
 
+The graph verifier also accepts a resolution after the mode. For example,
+`ddim normal txt2img 512` exercises a `[1,4,64,64]` latent instead of the
+default `[1,4,8,8]` fixture.
+
 Both F32 and fully converted F16 public checkpoints execute all seven nodes,
 match their independent numerical oracles, emit 852/848-byte PNGs, close the
 three lazy files, release conditioning/latent/image and all cached weights, and
-finish at zero tracked GPU buffers. The measured F32 peak is 7,738,644 bytes.
+finish at zero tracked GPU buffers. The measured F32 peak is 7,739,668 bytes.
 The Deno `KSampler` shares the production scheduler implementations with the
-JVM runtime: `ddim`, `euler`, `euler_ancestral`, and `dpmpp_2m`, using `normal`
-or Karras rho-7 sigma schedules where valid, plus partial-denoise timestep
+JVM runtime: `ddim`, `euler`, `euler_ancestral`, `dpmpp_2s_ancestral`, and
+`dpmpp_2m`, using `normal`, Karras rho-7, exponential, or polyexponential sigma
+schedules where valid, plus partial-denoise timestep
 slicing. Initial and ancestral noise remain an injected seeded host function.
-The real F32 seven-node graph was run for all seven valid sampler/scheduler
+The real F32 seven-node graph was run for all seventeen valid sampler/scheduler
 combinations; every run produced a finite 16×16 PNG and returned to zero live
-GPU buffers, with PNG sizes from 847 to 859 bytes. DDIM additionally retains its
+GPU buffers, with PNG sizes from 847 to 859 bytes. The execution lifecycle owns
+all node outputs until `release-execution!`; nodes borrow linked inputs, and the
+single release boundary deduplicates aliased GPU handles before closing model
+caches and checkpoint files. DDIM additionally retains its
 pinned PyTorch trajectory comparison; the scheduler's dedicated live Metal gate
 provides CPU parity for Euler/ancestral/DPM++ transitions.
 
@@ -535,15 +550,74 @@ median 480.645 ms). The independent JVM CPU pipeline took 55.765 s for the same
 fixed two-step graph, roughly 116× the Metal interval. F16 checkpoint expansion
 measured 557.774–601.661 ms (mean 581.062 ms): it halves checkpoint traffic but
 is slower for this tiny model because 458 separate half-expansion dispatches
-dominate. Single fresh-process measurements for the other six F32 combinations
-were 488.312–541.193 ms. These are tiny 16×16 output measurements with warm OS
-file cache, not evidence for 512×512 production throughput; full-size profiling
+dominate. Single fresh-process measurements for the original other six F32
+combinations were 488.312–541.193 ms. The six exponential/polyexponential
+Metal runs measured 461.083–528.334 ms and emitted 847-byte PNGs. These are tiny
+16×16 output measurements with warm OS cache. DPM++ 2S ancestral's four schedule
+runs measured 606.114–681.070 ms and emitted 849–852-byte PNGs; its extra
+midpoint UNet evaluations account for the higher interval. These use a warm OS
+file cache and are not evidence for 512×512 production throughput; full-size profiling
 and kernel fusion remain required.
+
+The resolution-variable gate now also runs the public tiny pipeline with a
+ComfyUI width/height request of 512. Because this intentionally small fixture's
+VAE has only one upsample stage, it emits 128×128 rather than a production SD
+VAE's 512×512. Nevertheless, the real workload grows from 256 to 16,384 latent
+elements: DDIM and DPM++ 2M/Karras emitted 46,274/46,157-byte PNGs in
+2,672.775/2,692.008 ms, peaked at 18,148,820 tracked GPU bytes, produced only
+finite values, and returned to zero live buffers and bytes.
+
+A separate large-model gate now uses Stability AI's public 319 MiB
+`sd-vae-ft-mse` Diffusers safetensors instead of the tiny fixture. The JVM
+exporter infers its four decoder blocks, 140 decoder tensors are then loaded
+directly and lazily by Deno, and a real 64×64 latent is decoded to a 512×512
+PNG on Apple Metal:
+
+```sh
+clojure -M:export-vae-metal-spec vae-spec.edn \
+  diffusion_pytorch_model.safetensors config.json
+clojure -M:standard-vae-metal-verify
+deno run --allow-all target/standard-vae-metal-verify.cjs \
+  vae-spec.edn diffusion_pytorch_model.safetensors output-directory
+```
+
+WebGPU limits a single storage binding to 128 MiB and one dispatch dimension
+to 65,535 workgroups on this adapter, so a monolithic standard decode is
+intentionally rejected. The production `VAEDecodeTiled` node uses 121
+overlapping 8×8 latent tiles with feather blending, keeps the 140-weight cache
+shared across tiles, and emits a 437,703-byte 512×512 PNG in 29,350.735 ms. It
+reads 197,960,796 decoder bytes, peaks at 208,513,196 tracked GPU bytes, produces
+finite pixels, and returns to zero live buffers and bytes. The verifier calls
+the ordinary async executor with the API-format
+`VAEDecodeTiled → SaveImage` graph, not a private tiler or PNG writer. This
+establishes a real standard-SD VAE node-graph path;
+larger tiles will require multidimensional dispatch and split bindings.
+
+The same node graph also consumes a streaming-converted uniform-F16 version of
+the official VAE. All 140 decoder tensors take the direct encoded upload path;
+checkpoint traffic falls from 197,960,796 to 98,980,398 bytes. Convolution,
+GroupNorm, SiLU, residual addition, and their weights and activations now remain
+in physical F16 Metal buffers. Nearest upsample and channel slice now also stay
+in F16. Scalar scale is native F16 and final RGB conversion unpacks directly
+to its required f32 image output. VAE attention, its projections, transpose,
+stable softmax, and bias addition now remain F16 as well, so all 140 decoder
+weights have one cached physical-F16 buffer and there is no internal F32 cast boundary.
+
+On Apple M4 this mixed-precision run emitted a 437,945-byte 512×512 PNG with
+image sum 354,452.799645, returned to zero live buffers and bytes, and reduced
+peak tracked GPU memory from 208,513,196 to 104,289,408 bytes (50.0%). It took
+34,520.805 ms versus the comparable F32 path's 30,656.186 ms. Replacing the
+per-output scalar GroupNorm statistics with one 256-thread reduction per group
+made the same F16 workload 6.27× faster than its prior 212,110.667 ms run. The
+final RGB8 comparison against F32 has maximum error 2/255 and mean error
+0.0603/255. This is verified native mixed-precision execution with a 12.6%
+runtime cost and a 50.0% peak-memory reduction; packed convolution optimization
+and eliminating remaining cast boundaries are still necessary.
 
 This is not yet a verified production SD/SDXL render: the automatic graph
 mapping still needs full-size validation and pixel/numerical comparison against
 upstream Diffusers, and additional ancestral/DPM-SDE/3M sampler families,
-exponential/polyexponential schedules, additional VAE variants, mixed precision, and an installed real
+additional VAE variants, further mixed-precision optimization, and an installed real
 checkpoint for end-to-end image comparison remain required. Production image
 generation therefore still uses Python ComfyUI/PyTorch today.
 
