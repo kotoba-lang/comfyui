@@ -57,7 +57,14 @@
   ;; produce differing images — the seed was simply doing nothing.
   (let [code #?(:clj (fn [c] (int c))
                 :cljs (fn [c] (.charCodeAt c 0)))]
-    (Math/abs (reduce (fn [h c] (bit-or 0 (+ (* 31 h) (code c)))) 7 (str k)))))
+    ;; `(bit-or 0 x)` truncates to a signed 32-bit int in JavaScript but is a
+    ;; NO-OP on the JVM, where `bit-or` is a long operation. So `h` grew without
+    ;; bound under :clj and `(* 31 h)` threw `ArithmeticException: long overflow`
+    ;; once the key was long enough — while :cljs silently kept wrapping. The two
+    ;; platforms were computing different seeds before that, and the JVM stopped
+    ;; computing one at all. `unchecked-multiply` + `unchecked-int` is the same
+    ;; `|0` truncation on both.
+    (Math/abs (reduce (fn [h c] (unchecked-int (+ (unchecked-multiply 31 h) (code c)))) 7 (str k)))))
 
 (defn graph
   "Request + config -> the ComfyUI node graph, keyed by node id.
