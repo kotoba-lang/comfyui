@@ -28,8 +28,15 @@
     :else nil))
 
 (defn- linear [x weight bias]
-  (let [transposed (t/transpose weight)
-        multiplied (t/matmul x transposed)
+  (let [shape (:shape x)
+        features (long (peek shape))
+        rows (quot (arr/nelems shape) features)
+        matrix (if (= 2 (count shape)) x (t/reshape x [rows features]))
+        transposed (t/transpose weight)
+        product (t/matmul matrix transposed)
+        multiplied (if (= 2 (count shape))
+                     product
+                     (t/reshape product (conj (pop shape) (first (:shape weight)))))
         output (if bias (t/add multiplied bias) multiplied)]
     (arr/release! transposed)
     (when bias (arr/release! multiplied))
@@ -336,6 +343,12 @@
       (arr/release! temporary))
     result))
 
+(defn- upsample [value scale-factor]
+  (t/upsample-nearest2d value scale-factor))
+
+(defn- scale [value factor]
+  (t/scale value factor))
+
 (defn- timestep-embedding [value timestep tensor! layer]
   (let [first-weight (tensor! (:first-weight layer))
         first-bias (tensor! (:first-bias layer))
@@ -421,7 +434,8 @@
         tensor! (fn [tensor-name]
                   (when tensor-name
                     (or (get @cache tensor-name)
-                        (let [tensor ((:comfyui/read-tensor component) backend tensor-name)]
+                        (let [tensor ((:comfyui/read-tensor component)
+                                      backend tensor-name)]
                           (swap! cache assoc tensor-name tensor)
                           tensor))))]
     (with-meta
@@ -458,7 +472,7 @@
                    :silu (assoc state :value (t/silu value))
 
                    :scale
-                   (assoc state :value (t/scale value (:factor layer)))
+                   (assoc state :value (scale value (:factor layer)))
 
                    :save
                    (assoc-in state [:saved (:name layer)] value)
@@ -481,7 +495,7 @@
 
                    :upsample
                    (assoc state :value
-                          (t/upsample-nearest2d value (or (:scale-factor layer) 2)))
+                          (upsample value (or (:scale-factor layer) 2)))
 
                    :add-conditioning
                    (let [condition (conditioning-tensor conditioning)]
@@ -592,7 +606,10 @@
   [component backend spec]
   (let [graph (compile-graph component backend
                              (assoc spec :release-intermediates? true) false)]
-    (with-meta (fn [latent] (graph latent 0 nil)) (meta graph))))
+    (with-meta (fn [latent] (graph latent 0 nil))
+      (cond-> (meta graph)
+        (:comfyui/dtype component)
+        (assoc :comfyui/dtype (:comfyui/dtype component))))))
 
 (defn compile-encoder
   "Compile a checkpoint-backed image-to-latent graph. Encoder specs retain

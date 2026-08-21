@@ -4,6 +4,7 @@
             [comfyui.clip.encoder :as clip]
             [comfyui.diffusion.model :as model]
             [comfyui.diffusion.scheduler :as scheduler]
+            [comfyui.diffusion.tiled-vae-deno :as tiled-vae]
             [comfyui.png-deno :as png]
             [comfyui.safetensors-deno :as safe]
             [num.array :as arr]
@@ -25,6 +26,20 @@
     (doseq [cache caches] (reset! cache {}))
     (doseq [checkpoint checkpoints] (safe/close-file! checkpoint))
     nil))
+
+(defn release-execution!
+  "Release every distinct public NDArray and model component retained by an
+  executor result. Nodes borrow their inputs, so the result graph remains valid
+  until this explicit lifecycle boundary."
+  [execution]
+  (let [values (tree-seq coll? seq (:results execution))
+        arrays (filter #(and (map? %) (:backend %) (:handle %)) values)
+        components (->> values
+                        (filter #(and (map? %) (:comfyui/component %)))
+                        distinct
+                        vec)]
+    (arr/release-all! arrays)
+    (release-components! components)))
 
 (defn- safe-prefix [value]
   (let [value (str/replace (or value "ComfyUI") #"[^A-Za-z0-9._-]" "_")]
@@ -193,10 +208,13 @@
     :fn
     (fn [{:keys [model positive negative latent_image seed steps cfg
                  sampler_name scheduler denoise]}]
-      (when-not (and (contains? #{"ddim" "euler" "euler_ancestral" "dpmpp_2m"}
+      (when-not (and (contains? #{"ddim" "euler" "euler_ancestral" "dpmpp_2m"
+                                  "dpmpp_2s_ancestral"}
                                 sampler_name)
-                     (contains? #{"normal" "karras"} scheduler)
-                     (not (and (= "ddim" sampler_name) (= "karras" scheduler)))
+                     (contains? #{"normal" "karras" "exponential"
+                                  "polyexponential"} scheduler)
+                     (not (and (= "ddim" sampler_name)
+                               (not= "normal" scheduler)))
                      (< 0.0 (double denoise) 1.0000000001)
                      (fn? noise-fn))
         (throw (ex-info "unsupported Deno sampler/scheduler/denoise combination"
@@ -208,15 +226,15 @@
             denoise (double denoise)
             total-steps (if (= 1.0 denoise)
                           steps (max steps (long (/ steps denoise))))
-            karras? (= "karras" scheduler)
-            explicit-sigmas (when karras?
+            continuous-sigma? (not= "normal" scheduler)
+            explicit-sigmas (when continuous-sigma?
                               (vec (take-last
                                     (inc steps)
-                                    (scheduler/karras-sigmas
-                                     total-steps
+                                    (scheduler/sigma-schedule
+                                     scheduler total-steps
                                      (scheduler/alpha->sigma (double (first alphas)))
                                      (scheduler/alpha->sigma (double (last alphas)))))))
-            timesteps (if karras?
+            timesteps (if continuous-sigma?
                         (mapv #(scheduler/sigma->timestep alphas %)
                               (butlast explicit-sigmas))
                         (vec (take-last steps (timesteps-fn alphas total-steps))))
@@ -244,8 +262,12 @@
                       "euler" (scheduler/euler-sample args)
                       "euler_ancestral"
                       (scheduler/euler-ancestral-sample (assoc args :eta 1.0))
+                      "dpmpp_2s_ancestral"
+                      (scheduler/dpmpp-2s-ancestral-sample (assoc args :eta 1.0))
                       "dpmpp_2m" (scheduler/dpmpp-2m-sample args))]
-        (arr/release-all! [empty initial-noise initial-sample])
+        ;; `empty` is an upstream executor result and is borrowed by this node.
+        ;; Its owner releases it at the execution lifecycle boundary.
+        (arr/release-all! [initial-noise initial-sample])
         [{:samples (:sample sampled) :history (:history sampled)}]))}
    {:type "VAEDecode"
     :category "latent"
@@ -256,6 +278,19 @@
                 image (t/nchw-to-rgb-image decoded)]
             (arr/release! decoded)
             [image]))}
+   {:type "VAEDecodeTiled"
+    :category "latent"
+    :inputs {:samples {:type "LATENT"} :vae {:type "VAE"}
+             :tile_size {:type "INT" :default 8}
+             :overlap {:type "INT" :default 2}}
+    :outputs [{:name "IMAGE" :type "IMAGE"}]
+    :fn (fn [{:keys [samples vae tile_size overlap]}]
+          (let [latent (if (:samples samples) (:samples samples) samples)
+                decode (:comfyui/decode vae)]
+            (-> (tiled-vae/decode-tiled
+                 decode latent {:tile-size (or tile_size 8)
+                                :overlap (or overlap 2)})
+                (.then (fn [image] [image])))))}
    {:type "VAEEncode"
     :category "latent"
     :inputs {:pixels {:type "IMAGE"} :vae {:type "VAE"}}

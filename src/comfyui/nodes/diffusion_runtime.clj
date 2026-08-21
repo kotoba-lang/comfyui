@@ -425,6 +425,20 @@
                 (throw (ex-info "VAE decoder must return NCHW RGB"
                                 {:shape shape})))
               [(t/nchw-to-rgb-image decoded)])))}
+   {:type "VAEDecodeTiled"
+    :category "latent"
+    :inputs {:samples {:type "LATENT"}
+             :vae {:type "VAE"}
+             :tile_size {:type "INT" :default 8}
+             :overlap {:type "INT" :default 2}}
+    :outputs [{:name "IMAGE" :type "IMAGE"}]
+    :fn (fn [{:keys [samples vae]}]
+          ;; The JVM backend has no WebGPU binding limit; it preserves the
+          ;; public ComfyUI node contract while using the exact full decoder.
+          (let [latent (if (and (map? samples) (contains? samples :samples))
+                         (:samples samples) samples)
+                decoded ((:comfyui/decode vae) latent)]
+            [(t/nchw-to-rgb-image decoded)]))}
    {:type "VAEEncode"
     :category "latent"
     :inputs {:pixels {:type "IMAGE"}
@@ -466,12 +480,13 @@
     :fn (fn [{:keys [model positive negative latent_image seed steps cfg
                      sampler_name scheduler denoise]}]
           (when-not (and (contains? #{"ddim" "euler" "euler_ancestral"
-                                      "dpmpp_2m"} sampler_name)
-                         (contains? #{"normal" "karras"} scheduler)
+                                      "dpmpp_2m" "dpmpp_2s_ancestral"} sampler_name)
+                         (contains? #{"normal" "karras" "exponential"
+                                      "polyexponential"} scheduler)
                          (not (and (= "ddim" sampler_name)
-                                   (= "karras" scheduler)))
+                                   (not= "normal" scheduler)))
                          (< 0.0 (double denoise) 1.0000000001))
-            (throw (ex-info "runtime KSampler supports denoise in (0,1], normal schedules, and Karras for Euler/DPM++"
+            (throw (ex-info "runtime KSampler supports denoise in (0,1], normal DDIM, and continuous sigma schedules for Euler/DPM++"
                             {:sampler-name sampler_name :scheduler scheduler :denoise denoise})))
           (let [denoise-fn (:comfyui/denoise model)
                 alphas (:comfyui/alphas-cumprod model)
@@ -491,18 +506,18 @@
                 total-steps (if (= 1.0 denoise)
                               steps
                               (max steps (long (/ steps denoise))))
-                karras? (= "karras" scheduler)
+                continuous-sigma? (not= "normal" scheduler)
                 explicit-sigmas
-                (when karras?
+                (when continuous-sigma?
                   (vec
                    (take-last
                     (inc steps)
-                    (scheduler/karras-sigmas
-                     total-steps
+                    (scheduler/sigma-schedule
+                     scheduler total-steps
                      (scheduler/alpha->sigma (double (first alphas)))
                      (scheduler/alpha->sigma (double (last alphas)))))))
                 timesteps
-                (if karras?
+                (if continuous-sigma?
                   (mapv #(scheduler/sigma->timestep alphas %)
                         (butlast explicit-sigmas))
                   (vec
@@ -547,6 +562,9 @@
                          "euler" (scheduler/euler-sample sampler-args)
                          "euler_ancestral"
                          (scheduler/euler-ancestral-sample
+                          (assoc sampler-args :eta 1.0))
+                         "dpmpp_2s_ancestral"
+                         (scheduler/dpmpp-2s-ancestral-sample
                           (assoc sampler-args :eta 1.0))
                          "dpmpp_2m" (scheduler/dpmpp-2m-sample sampler-args))]
             [(:sample result)]))}])
