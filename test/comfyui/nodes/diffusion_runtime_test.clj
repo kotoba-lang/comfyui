@@ -1,5 +1,5 @@
 (ns comfyui.nodes.diffusion-runtime-test
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [clojure.test :refer [deftest is]]
             [comfyui.exec :as exec]
             [comfyui.clip.tokenizer :as clip-tokenizer]

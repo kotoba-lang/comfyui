@@ -1,6 +1,6 @@
 (ns comfyui.real-diffusers-unet-verify
   "Execute a real small Diffusers Stable Diffusion UNet safetensors graph."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [comfyui.nodes.diffusion-runtime :as runtime]
             [comfyui.safetensors :as safe]
             [num.array :as arr]

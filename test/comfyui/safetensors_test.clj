@@ -1,5 +1,5 @@
 (ns comfyui.safetensors-test
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [clojure.test :refer [deftest is testing]]
             [comfyui.safetensors :as safe]
             [num.array :as arr]

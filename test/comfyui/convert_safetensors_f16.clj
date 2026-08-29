@@ -1,6 +1,6 @@
 (ns comfyui.convert-safetensors-f16
   "Streaming validation utility: quantize floating safetensors entries to F16."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [comfyui.safetensors :as safe]
             [num.array :as arr]
             [num.cpu :as cpu]

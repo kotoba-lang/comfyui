@@ -1,6 +1,6 @@
 (ns comfyui.real-diffusers-pipeline-verify
   "Run real split Diffusers UNet, CLIP, scheduler, and VAE files to a PNG."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [comfyui.clip.tokenizer :as tokenizer]
             [comfyui.exec :as exec]
             [comfyui.diffusion.scheduler :as scheduler]
