@@ -1,6 +1,6 @@
 (ns comfyui.export-diffusers-metal-spec
   "Export inferred graph data and deterministic tokens for the Deno Metal host."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [comfyui.clip.tokenizer :as tokenizer]
             [comfyui.diffusion.architecture :as architecture]
             [comfyui.diffusion.scheduler :as scheduler]

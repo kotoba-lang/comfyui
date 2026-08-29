@@ -1,7 +1,7 @@
 (ns comfyui.clip.tokenizer
   "OpenAI CLIP byte-level BPE tokenizer. Loads the standard encoder.json and
   merges.txt artifacts and emits fixed-length token IDs/masks."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [clojure.string :as str])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files Paths]))

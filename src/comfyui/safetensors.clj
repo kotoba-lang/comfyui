@@ -5,7 +5,7 @@
   header length, the UTF-8 header, then contiguous tensor payloads. This
   namespace validates every declared window before exposing it and reads only
   requested tensors, so multi-gigabyte checkpoints are not materialized."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [num.array :as arr])
   (:import [java.io Closeable RandomAccessFile]
            [java.nio ByteBuffer ByteOrder]

@@ -1,6 +1,6 @@
 (ns comfyui.real-diffusers-vae-verify
   "Decode a latent through a real Diffusers AutoencoderKL safetensors file."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [clojure.string :as str]
             [comfyui.nodes.diffusion-runtime :as runtime]
             [comfyui.safetensors :as safe]

@@ -1,6 +1,6 @@
 (ns comfyui.export-vae-metal-spec
   "Export an inferred Diffusers AutoencoderKL graph for the Deno Metal gate."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [comfyui.diffusion.architecture :as architecture]
             [comfyui.safetensors :as safe])
   (:import [java.nio.file Files Path]))
