@@ -13,7 +13,7 @@
   Node input names and defaults were read from a live server's /object_info
   (KSampler, EmptyLatentImage, SaveImage), not guessed."
 
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def default-config
   "Defaults a caller may override wholesale. A consumer that cares about style

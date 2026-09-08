@@ -1,6 +1,6 @@
 (ns comfyui.diffusion.architecture-test
   (:require [clojure.test :refer [deftest is testing]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [comfyui.diffusion.architecture :as architecture]
             [comfyui.diffusion.scheduler :as scheduler]))
 

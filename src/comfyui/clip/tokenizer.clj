@@ -2,7 +2,7 @@
   "OpenAI CLIP byte-level BPE tokenizer. Loads the standard encoder.json and
   merges.txt artifacts and emits fixed-length token IDs/masks."
   (:require [json.data-json :as json]
-            [clojure.string :as str])
+            [kotoba.lang.text :as str])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files Paths]))
 
@@ -69,7 +69,7 @@
                        {:start-token start-token :end-token end-token
                         :context-length context-length})))
      (fn [text]
-       (let [pieces (re-seq token-pattern (str/lower-case (str/trim (str text))))
+       (let [pieces (re-seq token-pattern (str/lower (str/trim (str text))))
              token-strings
              (mapcat
               (fn [piece]

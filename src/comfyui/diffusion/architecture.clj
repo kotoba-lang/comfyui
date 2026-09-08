@@ -1,7 +1,7 @@
 (ns comfyui.diffusion.architecture
   "Read-only diffusion checkpoint architecture inference from safetensors
   names and shapes. No payload is decoded during inspection."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [comfyui.diffusion.scheduler :as scheduler]
             [comfyui.safetensors :as safe])
   (:import [java.util.regex Pattern]))

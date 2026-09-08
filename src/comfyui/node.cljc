@@ -18,7 +18,7 @@
   single output. Heavy host work (diffusion, image codecs, …) follows
   the langchain-clj pattern: close over injected host capabilities
   when constructing the node type."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn registry
   "Creates a node-type registry (atom of type-name → node-type)."

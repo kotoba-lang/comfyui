@@ -2,7 +2,7 @@
   "Standard node pack — pure-data primitives (the engine demo set;
   heavy media nodes belong to host-specific packs that close over
   injected capabilities, see `host-fn-node`)."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def primitive-int
   {:type "PrimitiveInt" :category "primitive"
@@ -52,7 +52,7 @@
   {:type "UpperCase" :category "text"
    :inputs {:text {:type "STRING"}}
    :outputs [{:name "text" :type "STRING"}]
-   :fn (fn [{:keys [text]}] [(str/upper-case text)])})
+   :fn (fn [{:keys [text]}] [(str/upper text)])})
 
 (def format-text
   {:type "FormatText" :category "text"

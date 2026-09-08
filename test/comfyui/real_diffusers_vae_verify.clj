@@ -1,7 +1,7 @@
 (ns comfyui.real-diffusers-vae-verify
   "Decode a latent through a real Diffusers AutoencoderKL safetensors file."
   (:require [json.data-json :as json]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [comfyui.nodes.diffusion-runtime :as runtime]
             [comfyui.safetensors :as safe]
             [num.array :as arr]

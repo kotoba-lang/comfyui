@@ -2,7 +2,7 @@
   "Cases here are the bugs the first working version shipped with, all of which
   were silent: a graph the server rejects, and a config path that only worked
   when no config was passed."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.lang.text] [clojure.test :refer [deftest is testing]]
             [comfyui.native :as native]))
 
 (deftest every-config-path-yields-a-usable-graph
@@ -25,7 +25,7 @@
   (is (= "1girl, sunset" (get-in (native/graph {:prompt "1girl, sunset"}) ["2" :inputs :text]))))
 
 (deftest negative-falls-back-but-positive-does-not
-  (is (= (clojure.string/join ", " native/default-negative)
+  (is (= (kotoba.lang.text/join ", " native/default-negative)
          (get-in (native/graph {:prompt "a"}) ["3" :inputs :text])))
   (is (= "bad hands" (get-in (native/graph {:prompt "a" :negative ["bad hands"]}) ["3" :inputs :text]))))
 
