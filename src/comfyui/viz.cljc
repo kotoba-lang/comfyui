@@ -1,6 +1,6 @@
 (ns comfyui.viz
   "Workflow → Mermaid flowchart string."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [comfyui.workflow :as wf]))
 
 (defn- nid [id] (str "n" (str/replace id #"[^A-Za-z0-9_]" "_")))

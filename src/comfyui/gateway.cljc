@@ -25,7 +25,7 @@
             [langchain.db :as db]
             #?(:clj [org.httpkit.client :as http])
             #?(:clj [jsonista.core :as j])
-            #?(:clj [clojure.string :as str])))
+            #?(:clj [kotoba.lang.text :as str])))
 
 ;; ───────────────────────── gateway host call ─────────────────────────
 

@@ -2,7 +2,7 @@
   "Executable JVM diffusion nodes. Unlike `comfyui.nodes.diffusion`'s shape
   contracts, every node in this pack performs real work: image I/O, checkpoint
   execution, latent allocation, or sampling."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [comfyui.clip.encoder :as clip-encoder]
             [comfyui.diffusion.architecture :as architecture]
             [comfyui.diffusion.model :as diffusion-model]
