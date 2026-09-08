@@ -12,7 +12,7 @@
   rather than a served one."
   (:require ["fs" :as fs]
             ["path" :as path]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [comfyui.native :as native]))
 
 (defn- json-post [url body]

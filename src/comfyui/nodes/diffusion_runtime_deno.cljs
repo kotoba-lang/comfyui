@@ -1,6 +1,6 @@
 (ns comfyui.nodes.diffusion-runtime-deno
   "Executable ComfyUI diffusion node pack for Deno WebGPU/Metal hosts."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [comfyui.clip.encoder :as clip]
             [comfyui.diffusion.model :as model]
             [comfyui.diffusion.scheduler :as scheduler]
