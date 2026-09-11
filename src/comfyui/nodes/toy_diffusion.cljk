@@ -31,7 +31,7 @@
   close num.tensor's own documented Deno-async gap) and must be run through
   `comfyui.exec/execute-async`, not the plain synchronous `execute`
   ToyDiffusionStep uses. Genuinely runs on real Metal when given a live
-  `num.deno-gpu` backend NDArray — see `test/comfyui/nodes/toy_diffusion_metal_verify.cljs`.
+  `num.deno-gpu` backend NDArray — see `test/comfyui/nodes/toy_diffusion_metal_verify.cljk`.
   ToyDiffusionStep (CPU-sync) is UNCHANGED and still the node to reach for
   when a caller just wants `execute`, not `execute-async`.
 
