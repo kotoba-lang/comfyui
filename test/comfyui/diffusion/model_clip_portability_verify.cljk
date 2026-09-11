@@ -9,9 +9,9 @@
   under Node proves real ClojureScript/nbb portability, not just compilation.
 
   This is NOT a new fixture: both cases are the exact fixtures from
-  test/comfyui/diffusion/model_test.clj
+  test/comfyui/diffusion/model_test.cljk
   (learned-cross-attention-and-timestep-embedding-execute, denoise sample 10
-  condition-a only) and test/comfyui/clip/encoder_test.clj
+  condition-a only) and test/comfyui/clip/encoder_test.cljk
   (checkpoint-backed-causal-clip-transformer-encodes-tokens), and the
   expected vectors below were captured by running those same fixtures on the
   JVM (`clojure -M -e ...`) before this conversion. Passing here means CLJS
