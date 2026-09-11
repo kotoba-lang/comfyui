@@ -40,7 +40,7 @@
   ;; ADR-2607131500 follow-up: comfyui.nodes.toy-diffusion's Metal-backed
   ;; twin (ToyDiffusionStepMetal / execute-async), on real Metal, cross-
   ;; checked against the CPU-sync ToyDiffusionStep node's result.
-  ;;   clojure -M:toy-diffusion-metal-verify && deno run --allow-all target/toy-diffusion-metal-verify.cjs
+  ;;   kbb -M:toy-diffusion-metal-verify && deno run --allow-all target/toy-diffusion-metal-verify.cjs
   :toy-diffusion-metal-verify
   {:extra-paths ["test"]
    :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}
@@ -101,7 +101,7 @@
   ;; num.tensor/num.autograd). Converted to .cljc; this alias proves the CLJS
   ;; build produces byte-identical floating-point output to the JVM for real
   ;; UNet cross-attention/timestep-embedding and CLIP self-attention math.
-  ;;   clojure -M:model-clip-portability-verify && node target/model-clip-portability-verify.cjs
+  ;;   kbb -M:model-clip-portability-verify && node target/model-clip-portability-verify.cjs
   :model-clip-portability-verify
   {:extra-paths ["test"]
    :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}

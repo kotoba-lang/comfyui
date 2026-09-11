@@ -1,7 +1,7 @@
 (ns pipeline
   "ComfyUI-style cached pipeline example. Runs offline:
 
-     clojure -Sdeps '{:paths [\"src\" \"examples\"] :deps {io.github.com-junkawasaki/langchain-clj {:git/tag \"v0.1.0\" :git/sha \"ae475c9\"}}}' \\
+     kbb -Sdeps '{:paths [\"src\" \"examples\"] :deps {io.github.com-junkawasaki/langchain-clj {:git/tag \"v0.1.0\" :git/sha \"ae475c9\"}}}' \\
              -M -e \"(require 'pipeline) (pipeline/-main)\""
   (:require [comfyui.node :as node]
             [comfyui.std :as std]
