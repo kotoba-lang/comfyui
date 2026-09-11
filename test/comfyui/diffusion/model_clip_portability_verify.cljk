@@ -14,13 +14,13 @@
   condition-a only) and test/comfyui/clip/encoder_test.cljk
   (checkpoint-backed-causal-clip-transformer-encodes-tokens), and the
   expected vectors below were captured by running those same fixtures on the
-  JVM (`clojure -M -e ...`) before this conversion. Passing here means CLJS
+  JVM (`kbb -M -e ...`) before this conversion. Passing here means CLJS
   and JVM independently compute IDENTICAL floating-point output from the same
   source for real UNet cross-attention/timestep-embedding math and real CLIP
   self-attention/layer-norm/quick-GELU math.
 
   Run under Node:
-    clojure -M:model-clip-portability-verify && node target/model-clip-portability-verify.cjs"
+    kbb -M:model-clip-portability-verify && node target/model-clip-portability-verify.cjs"
   (:require [comfyui.clip.encoder :as clip]
             [comfyui.diffusion.model :as model]
             [num.array :as arr]
@@ -71,7 +71,7 @@
         condition-a (arr/from-vec backend
                                   [1 0 0, 0 1 0, 0 0 1] [1 3 3])
         output-a (denoise sample 10 condition-a)
-        ;; captured from `clojure -M -e ...` against comfyui.diffusion.model
+        ;; captured from `kbb -M -e ...` against comfyui.diffusion.model
         ;; on the JVM, before this .clj -> .cljc conversion
         expected
         [0.34741008017511876 0.020680008609955544 0.4310500214747317
@@ -129,7 +129,7 @@
         encode (clip/compile-encoder component backend spec)
         tokens {:input-ids [1 2 3 4 0] :attention-mask [1 1 1 1 0]}
         result (encode tokens)
-        ;; captured from `clojure -M -e ...` against comfyui.clip.encoder on
+        ;; captured from `kbb -M -e ...` against comfyui.clip.encoder on
         ;; the JVM, before this .clj -> .cljc conversion
         expected-tensor
         [-1.309052932144666 -0.4788847200254251 0.41508410605962026

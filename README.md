@@ -136,7 +136,7 @@ big-endian type `1`, PNG format `2`, then the exact file bytes after an
 output-directory confinement and PNG-signature check.
 
 ```sh
-clojure -M:deno-server-verify
+kbb -M:deno-server-verify
 deno run --allow-all target/deno-server-verify.cjs
 # /prompt → serialized execution → /history: passed
 # /queue and /object_info contracts: passed
@@ -356,7 +356,7 @@ and then re-encodes the published tiny Stable Diffusion VAE, proving both paths 
 their actual tensor catalogs:
 
 ```sh
-clojure -M:real-diffusers-vae-verify vae.safetensors vae/config.json
+kbb -M:real-diffusers-vae-verify vae.safetensors vae/config.json
 ```
 
 `DiffusersPipelineLoader` loads the upstream directory layout without first
@@ -370,7 +370,7 @@ verifier executes prompt tokenization, positive/negative CLIP conditioning,
 CFG UNet sampling, VAE decoding, and PNG output:
 
 ```sh
-clojure -M:real-diffusers-pipeline-verify \
+kbb -M:real-diffusers-pipeline-verify \
   unet/model.safetensors unet/config.json \
   text_encoder/model.safetensors text_encoder/config.json \
   vae/model.safetensors vae/config.json scheduler/scheduler_config.json \
@@ -406,12 +406,12 @@ floating-point and integer dtypes, lazily uploads the requested weights, and
 executes CLIP → two CFG UNet/DDIM steps → VAE without a Python runtime:
 
 ```sh
-clojure -M:export-diffusers-metal-spec pipeline.edn \
+kbb -M:export-diffusers-metal-spec pipeline.edn \
   unet/model.safetensors unet/config.json \
   text_encoder/model.safetensors text_encoder/config.json \
   vae/model.safetensors vae/config.json scheduler/scheduler_config.json \
   tokenizer/vocab.json tokenizer/merges.txt
-clojure -M:real-diffusers-metal-verify
+kbb -M:real-diffusers-metal-verify
 deno run --allow-all target/real-diffusers-metal-verify.cjs \
   pipeline.edn unet/model.safetensors text_encoder/model.safetensors \
   vae/model.safetensors output.png
@@ -444,7 +444,7 @@ checkpoint at a time, quantizing floating tensors while preserving integer
 tensors, names, shapes, metadata, and lazy bounded I/O:
 
 ```sh
-clojure -M:convert-safetensors-f16 model.safetensors model-f16.safetensors
+kbb -M:convert-safetensors-f16 model.safetensors model-f16.safetensors
 ```
 
 The public tiny pipeline was converted across all 304 UNet tensors, 85 CLIP
@@ -483,7 +483,7 @@ CPU oracle, checks corrupt-CRC/path-escape rejection, and restores the exact GPU
 buffer baseline:
 
 ```sh
-clojure -M:deno-img2img-nodes-verify
+kbb -M:deno-img2img-nodes-verify
 deno run --allow-all target/deno-img2img-nodes-verify.cjs
 # PNG CRC and path confinement: passed
 # Deno PNG LoadImage → VAEEncode on Apple M4 passed
@@ -508,7 +508,7 @@ DiffusersPipelineLoader.VAE ─────────────────�
 ```
 
 ```sh
-clojure -M:real-diffusers-graph-metal-verify
+kbb -M:real-diffusers-graph-metal-verify
 deno run --allow-all target/real-diffusers-graph-metal-verify.cjs \
   pipeline.edn unet/model.safetensors text_encoder/model.safetensors \
   vae/model.safetensors output-directory
@@ -574,9 +574,9 @@ directly and lazily by Deno, and a real 64×64 latent is decoded to a 512×512
 PNG on Apple Metal:
 
 ```sh
-clojure -M:export-vae-metal-spec vae-spec.edn \
+kbb -M:export-vae-metal-spec vae-spec.edn \
   diffusion_pytorch_model.safetensors config.json
-clojure -M:standard-vae-metal-verify
+kbb -M:standard-vae-metal-verify
 deno run --allow-all target/standard-vae-metal-verify.cjs \
   vae-spec.edn diffusion_pytorch_model.safetensors output-directory
 ```
@@ -624,12 +624,12 @@ generation therefore still uses Python ComfyUI/PyTorch today.
 ## Tests / example
 
 ```sh
-clojure -M:test
-clojure -Sdeps '{:paths ["src" "examples"]
+kbb -M:test
+kbb -Sdeps '{:paths ["src" "examples"]
                  :deps {io.github.com-junkawasaki/langchain-clj
                         {:git/tag "v0.1.0" :git/sha "ae475c9"}}}' \
         -M -e "(require 'pipeline) (pipeline/-main)"
 ```
 
 Workspace development against a local langchain-clj checkout:
-`clojure -M:dev:test`.
+`kbb -M:dev:test`.

@@ -12,7 +12,7 @@
   executor ≡ CPU-sync-through-the-real-executor.
 
   Run under Deno:
-    clojure -M:toy-diffusion-metal-verify && deno run --allow-all target/toy-diffusion-metal-verify.cjs"
+    kbb -M:toy-diffusion-metal-verify && deno run --allow-all target/toy-diffusion-metal-verify.cjs"
   (:require [num.array :as arr]
             [num.cpu :as cpu]
             [num.deno-gpu :as dg]
