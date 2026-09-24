@@ -1,5 +1,5 @@
 (ns comfyui.safetensors-test
-  (:require [json.data-json :as json]
+  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
             [kotoba.test :refer [deftest is testing]]
             [comfyui.safetensors :as safe]
             [num.array :as arr]
@@ -16,7 +16,7 @@
                  "float.weight" {"dtype" "F32" "shape" [2] "data_offsets" [0 8]}
                  "half.weight" {"dtype" "F16" "shape" [2] "data_offsets" [8 12]}
                  "bfloat.weight" {"dtype" "BF16" "shape" [2] "data_offsets" [12 16]}})
-        header-bytes (.getBytes header "UTF-8")
+        header-bytes (kbytes/utf8-bytes header)
         out (doto (ByteBuffer/allocate (+ 8 (alength header-bytes) 16))
               (.order ByteOrder/LITTLE_ENDIAN))]
     (.putLong out (long (alength header-bytes)))
@@ -52,10 +52,9 @@
         (Files/deleteIfExists path)))))
 
 (deftest rejects-a-tensor-window-outside-the-payload
-  (let [header (.getBytes
+  (let [header (kbytes/utf8-bytes
                 (json/write-str {"x" {"dtype" "F32" "shape" [2]
-                                      "data_offsets" [0 8]}})
-                "UTF-8")
+                                      "data_offsets" [0 8]}}))
         out (doto (ByteBuffer/allocate (+ 8 (alength header) 4))
               (.order ByteOrder/LITTLE_ENDIAN))
         path (Files/createTempFile "comfyui-bad-safetensors-" ".safetensors"

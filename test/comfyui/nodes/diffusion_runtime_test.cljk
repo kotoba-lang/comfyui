@@ -1,5 +1,5 @@
 (ns comfyui.nodes.diffusion-runtime-test
-  (:require [json.data-json :as json]
+  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
             [kotoba.test :refer [deftest is]]
             [comfyui.exec :as exec]
             [comfyui.clip.tokenizer :as clip-tokenizer]
@@ -38,15 +38,14 @@
       (is (= {} @cache)))))
 
 (defn- checkpoint-fixture []
-  (let [header (.getBytes
+  (let [header (kbytes/utf8-bytes
                 (json/write-str
                  {"model.diffusion_model.input.weight"
                   {"dtype" "F32" "shape" [1] "data_offsets" [0 4]}
                   "cond_stage_model.token.weight"
                   {"dtype" "F32" "shape" [1] "data_offsets" [4 8]}
                   "first_stage_model.decoder.weight"
-                  {"dtype" "F32" "shape" [1] "data_offsets" [8 12]}})
-                "UTF-8")
+                  {"dtype" "F32" "shape" [1] "data_offsets" [8 12]}}))
         buffer (doto (ByteBuffer/allocate (+ 8 (alength header) 12))
                  (.order ByteOrder/LITTLE_ENDIAN))
         path (Files/createTempFile "comfyui-runtime-" ".safetensors"
@@ -66,7 +65,7 @@
                              "data_offsets" [offset end]})
                      end]))
                 [{} 0] tensors)
-        header (.getBytes (json/write-str entries) "UTF-8")
+        header (kbytes/utf8-bytes (json/write-str entries))
         buffer (doto (ByteBuffer/allocate (+ 8 (alength header) payload-size))
                  (.order ByteOrder/LITTLE_ENDIAN))
         path (Files/createTempFile "comfyui-unet-" ".safetensors"
