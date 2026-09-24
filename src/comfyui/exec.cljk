@@ -17,7 +17,7 @@
   Cache keys are canonical `pr-str` strings (no host hash functions —
   portable across JVM / SCI / CLJS / WASM); cached outputs must be
   EDN round-trippable when using the Datomic cache."
-  (:require #?(:clj [clojure.edn :as edn]
+  (:require #?(:clj [kotoba.lang.edn :as edn]
                :cljs [cljs.reader :as edn])
             [langchain.db :as db]
             [comfyui.node :as node]
