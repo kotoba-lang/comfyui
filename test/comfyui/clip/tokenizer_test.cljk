@@ -1,5 +1,5 @@
 (ns comfyui.clip.tokenizer-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [comfyui.clip.tokenizer :as clip]))
 
 (def encoder

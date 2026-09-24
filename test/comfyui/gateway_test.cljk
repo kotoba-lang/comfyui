@@ -2,7 +2,7 @@
   "ComfyUI gateway logic — `render-via-gateway` with an injected http-post, so
   the success-parse and error-fallback branches are tested without a live
   gateway (dev otherwise only exercises the no-config stub)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [comfyui.gateway :as comfy]))
 
 (def ^:private placeholder {:width 512 :height 512 :label "test (stub)"})
