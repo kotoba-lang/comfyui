@@ -2,7 +2,7 @@
   "Executable JVM diffusion nodes. Unlike `comfyui.nodes.diffusion`'s shape
   contracts, every node in this pack performs real work: image I/O, checkpoint
   execution, latent allocation, or sampling."
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.image :as kotoba-image] [kotoba.lang.text :as str]
             [comfyui.clip.encoder :as clip-encoder]
             [comfyui.diffusion.architecture :as architecture]
             [comfyui.diffusion.model :as diffusion-model]
@@ -11,10 +11,9 @@
             [num.array :as arr]
             [num.core :as nm]
             [num.tensor :as t])
-  (:import [java.awt.image BufferedImage]
+  (:import
            [java.nio.file Files Paths]
-           [java.util Random]
-           [javax.imageio ImageIO]))
+           [java.util Random]))
 
 (defonce ^:private output-counters (atom {}))
 
@@ -56,7 +55,7 @@
       (let [start (reserve-counters! directory prefix batch)]
         (mapv
          (fn [batch-index]
-         (let [image (BufferedImage. width height BufferedImage/TYPE_INT_RGB)
+         (let [image (kotoba-image/create width height :rgb)
                filename (format "%s_%05d.png" prefix (+ start batch-index))
                path (.resolve directory filename)]
            (dotimes [y height]
@@ -70,8 +69,8 @@
                      rgb (bit-or (bit-shift-left (byte 0) 16)
                                  (bit-shift-left (byte 1) 8)
                                  (byte 2))]
-                 (.setRGB image x y rgb))))
-           (when-not (ImageIO/write image "png" (.toFile path))
+                 (kotoba-image/set-rgb! image x y rgb))))
+           (when-not (kotoba-image/write-png-file! image (.toFile path))
              (throw (ex-info "no PNG ImageIO writer available" {})))
            {:filename filename :subfolder "" :type "output" :path (str path)}))
          (range batch))))))
@@ -90,22 +89,22 @@
     (when-not (and path (.startsWith path directory))
       (throw (ex-info "LoadImage path must be a file inside :input-directory"
                       {:filename filename :input-directory (str directory)})))
-    (let [image (ImageIO/read (.toFile path))]
+    (let [image (kotoba-image/read-file (.toFile path))]
       (when-not image
         (throw (ex-info "ImageIO could not decode image" {:path (str path)})))
-      (let [width (.getWidth image)
-            height (.getHeight image)
+      (let [width (kotoba-image/width image)
+            height (kotoba-image/height image)
             pixels (vec
                     (for [y (range height) x (range width) channel [16 8 0]]
                       (/ (double (bit-and 0xff
-                                          (bit-shift-right (.getRGB image x y)
+                                          (bit-shift-right (kotoba-image/get-rgb image x y)
                                                            channel)))
                          255.0)))
             mask (vec
                   (for [y (range height) x (range width)]
                     (- 1.0 (/ (double (bit-and 0xff
                                               (unsigned-bit-shift-right
-                                               (.getRGB image x y) 24)))
+                                               (kotoba-image/get-rgb image x y) 24)))
                               255.0))))]
         [(arr/from-vec backend pixels [1 height width 3])
          (arr/from-vec backend mask [1 height width])]))))
