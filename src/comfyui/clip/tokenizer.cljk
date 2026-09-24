@@ -1,9 +1,9 @@
 (ns comfyui.clip.tokenizer
   "OpenAI CLIP byte-level BPE tokenizer. Loads the standard encoder.json and
   merges.txt artifacts and emits fixed-length token IDs/masks."
-  (:require [json.data-json :as json]
+  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
             [kotoba.lang.text :as str])
-  (:import [java.nio.charset StandardCharsets]
+  (:import
            [java.nio.file Files Paths]))
 
 (def ^:private token-pattern
@@ -75,7 +75,7 @@
               (fn [piece]
                 (let [encoded (apply str
                                      (map #(get bytes (bit-and 0xff (int %)))
-                                          (.getBytes piece StandardCharsets/UTF_8)))]
+                                          (kbytes/utf8-bytes piece)))]
                   (or (get @cache encoded)
                       (let [result (bpe-token encoded merge-ranks)]
                         (swap! cache assoc encoded result)

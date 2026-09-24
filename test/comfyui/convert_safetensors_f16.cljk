@@ -1,14 +1,13 @@
 (ns comfyui.convert-safetensors-f16
   "Streaming validation utility: quantize floating safetensors entries to F16."
-  (:require [json.data-json :as json]
+  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
             [comfyui.safetensors :as safe]
             [num.array :as arr]
             [num.cpu :as cpu]
             [num.dtype :as dtype])
   (:import [java.io RandomAccessFile]
            [java.nio ByteBuffer ByteOrder]
-           [java.nio.channels FileChannel]
-           [java.nio.charset StandardCharsets]))
+           [java.nio.channels FileChannel]))
 
 (def ^:private floating? #{"F16" "BF16" "F32" "F64"})
 
@@ -55,7 +54,7 @@
           header-map (cond-> (into (sorted-map) entries)
                        (seq (:metadata source))
                        (assoc "__metadata__" (:metadata source)))
-          header (.getBytes (json/write-str header-map) StandardCharsets/UTF_8)
+          header (kbytes/utf8-bytes (json/write-str header-map))
           prefix (doto (ByteBuffer/allocate (+ 8 (alength header)))
                    (.order ByteOrder/LITTLE_ENDIAN)
                    (.putLong (long (alength header)))

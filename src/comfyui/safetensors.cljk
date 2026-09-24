@@ -5,12 +5,11 @@
   header length, the UTF-8 header, then contiguous tensor payloads. This
   namespace validates every declared window before exposing it and reads only
   requested tensors, so multi-gigabyte checkpoints are not materialized."
-  (:require [json.data-json :as json]
+  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
             [num.array :as arr])
   (:import [java.io Closeable RandomAccessFile]
            [java.nio ByteBuffer ByteOrder]
-           [java.nio.channels FileChannel]
-           [java.nio.charset StandardCharsets]))
+           [java.nio.channels FileChannel]))
 
 (def ^:private max-header-bytes (* 128 1024 1024))
 (def ^:private dtype-bytes
@@ -54,7 +53,7 @@
                           {:header-length header-length :file-length file-length})))
         (let [header-buffer (ByteBuffer/allocate (int header-length))
               _ (read-fully-at! channel header-buffer 8)
-              header-json (String. (.array header-buffer) StandardCharsets/UTF_8)
+              header-json (kbytes/utf8-string (.array header-buffer))
               header (json/read-str header-json)
               metadata (get header "__metadata__" {})
               tensors (dissoc header "__metadata__")
