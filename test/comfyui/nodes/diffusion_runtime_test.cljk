@@ -1,5 +1,5 @@
 (ns comfyui.nodes.diffusion-runtime-test
-  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
+  (:require [kotoba.image :as kotoba-image] [kotoba.bytes :as kbytes] [json.data-json :as json]
             [kotoba.test :refer [deftest is]]
             [comfyui.exec :as exec]
             [comfyui.clip.tokenizer :as clip-tokenizer]
@@ -9,11 +9,10 @@
             [comfyui.safetensors :as safe]
             [num.array :as arr]
             [num.cpu :as cpu])
-  (:import [java.awt.image BufferedImage]
+  (:import
            [java.nio ByteBuffer ByteOrder]
            [java.nio.file Files OpenOption]
-           [java.nio.file.attribute FileAttribute]
-           [javax.imageio ImageIO]))
+           [java.nio.file.attribute FileAttribute]))
 
 (def backend (cpu/cpu-backend))
 
@@ -243,10 +242,10 @@
   (let [input-dir (Files/createTempDirectory
                    "comfyui-load-image-" (make-array FileAttribute 0))
         image-path (.resolve input-dir "seed.png")
-        source (BufferedImage. 2 1 BufferedImage/TYPE_INT_ARGB)
-        _ (.setRGB source 0 0 (unchecked-int 0xff0080ff))
-        _ (.setRGB source 1 0 (unchecked-int 0x4040c080))
-        _ (ImageIO/write source "png" (.toFile image-path))
+        source (kotoba-image/create 2 1 :argb)
+        _ (kotoba-image/set-rgb! source 0 0 (unchecked-int 0xff0080ff))
+        _ (kotoba-image/set-rgb! source 1 0 (unchecked-int 0x4040c080))
+        _ (kotoba-image/write-png-file! source (.toFile image-path))
         registry (node/registry
                   (runtime/pack {:backend backend :input-directory input-dir}))
         encoded-input (atom nil)
