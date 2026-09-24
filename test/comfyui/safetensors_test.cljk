@@ -1,6 +1,6 @@
 (ns comfyui.safetensors-test
   (:require [json.data-json :as json]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [comfyui.safetensors :as safe]
             [num.array :as arr]
             [num.cpu :as cpu])

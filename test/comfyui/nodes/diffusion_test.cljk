@@ -4,7 +4,7 @@
   image, video, audio — using the diffusion node contracts. The graph algebra
   (links, types, topo order) is shared kotoba data; only the compute is a host
   pack. This is the kotoba-native bridge: no Python, no murakumo→comfyui dep."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [comfyui.node :as node]
             [comfyui.nodes.diffusion :as diff]
             [comfyui.workflow :as wf]))

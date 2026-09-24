@@ -2,7 +2,7 @@
   (:require [comfyui.diffusion.scheduler :as scheduler]
             [num.array :as arr]
             [num.cpu :as cpu]
-            #?(:clj [clojure.test :refer [deftest is testing]]
+            #?(:clj [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer-macros [deftest is testing]])))
 
 (def backend (cpu/cpu-backend))

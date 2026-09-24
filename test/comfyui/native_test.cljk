@@ -2,7 +2,7 @@
   "Cases here are the bugs the first working version shipped with, all of which
   were silent: a graph the server rejects, and a config path that only worked
   when no config was passed."
-  (:require [kotoba.lang.text] [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.lang.text] [kotoba.test :refer [deftest is testing]]
             [comfyui.native :as native]))
 
 (deftest every-config-path-yields-a-usable-graph

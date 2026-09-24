@@ -8,7 +8,7 @@
   WIRING — node registry -> exec engine -> real :fn -> real compute — plus a
   sanity bound on the output (attention output is a convex combination of
   its V rows, so it must fall within [min(V) max(V)])."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [num.array :as arr]
             [num.cpu :as cpu]
             [comfyui.exec :as exec]

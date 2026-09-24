@@ -1,5 +1,5 @@
 (ns comfyui.diffusion.model-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [comfyui.diffusion.model :as model]
             [num.array :as arr]
             [num.cpu :as cpu]

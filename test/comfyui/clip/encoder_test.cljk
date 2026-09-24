@@ -1,5 +1,5 @@
 (ns comfyui.clip.encoder-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [comfyui.clip.encoder :as clip]
             [num.array :as arr]
             [num.cpu :as cpu]))

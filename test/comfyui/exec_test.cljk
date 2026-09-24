@@ -1,5 +1,5 @@
 (ns comfyui.exec-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [comfyui.node :as node]
             [comfyui.std :as std]
             [comfyui.exec :as exec]
