@@ -1,5 +1,5 @@
 (ns comfyui.safetensors-test
-  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [json.data-json :as json]
             [kotoba.test :refer [deftest is testing]]
             [comfyui.safetensors :as safe]
             [num.array :as arr]
@@ -46,7 +46,7 @@
             (let [tensor (safe/read-tensor checkpoint backend name)]
               (is (= [2] (:shape tensor)))
               (is (= expected (arr/->vec tensor))))))
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not found"
+        (is (thrown-with-msg? kerror/ExceptionInfo #"not found"
                               (safe/read-tensor checkpoint backend "missing"))))
       (finally
         (Files/deleteIfExists path)))))
@@ -64,7 +64,7 @@
       (.put out header)
       (.putFloat out (float 1.0))
       (Files/write path (.array out) (make-array OpenOption 0))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid safetensors tensor entry"
+      (is (thrown-with-msg? kerror/ExceptionInfo #"invalid safetensors tensor entry"
                             (safe/open-file path)))
       (finally
         (Files/deleteIfExists path)))))

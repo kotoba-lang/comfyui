@@ -18,7 +18,7 @@
   gateway call (POST /v1/images/generations, response_format b64_json). With
   no configured base URL it returns a placeholder SVG, so the pipeline runs
   end-to-end without a GPU."
-  (:require [comfyui.node :as node]
+  (:require [kotoba.bytes :as kbytes] [comfyui.node :as node]
             [comfyui.std :as std]
             [comfyui.queue :as q]
             [comfyui.exec :as exec]
@@ -38,7 +38,7 @@
                    "<text x='16' y='40' fill='#8aa0c0' font-size='14'>" label "</text>"
                    "<text x='16' y='70' fill='#5e6b82' font-size='11'>"
                    (subs prompt 0 (min 40 (count prompt))) "</text></svg>")
-              (.getBytes "UTF-8")
+              (kbytes/utf8-bytes)
               (->> (.encodeToString (java.util.Base64/getEncoder))))
      :cljs "PHN2Zz48L3N2Zz4="))
 

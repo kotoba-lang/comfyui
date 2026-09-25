@@ -1,5 +1,5 @@
 (ns comfyui.diffusion.model-test
-  (:require [kotoba.test :refer [deftest is testing]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is testing]]
             [comfyui.diffusion.model :as model]
             [num.array :as arr]
             [num.cpu :as cpu]
@@ -175,7 +175,7 @@
     (denoise sample 10 condition-a)
     (is (= 12 @reads) "subsequent denoising reuses the tensor cache")
     (testing "cross-attention rejects a ComfyUI conditioning shape it cannot lower"
-      (is (thrown? clojure.lang.ExceptionInfo
+      (is (thrown? kerror/ExceptionInfo
                    (denoise sample 10 (arr/from-vec backend [1 2 3] [3])))))))
 
 (deftest sdxl-pooled-time-ids-flow-through-label-and-resblock-embedding
