@@ -8,6 +8,9 @@
  ;; (every current consumer already declares them for its own server needs)
  ;; -- see the :test alias for how this repo's own tests supply them.
  :deps {
+        ;; kotoba.lang.error replaced clojure.lang.ExceptionInfo here (2026-09-25).
+        ;; An explicit floor: tools.deps takes the NEWEST sha it is shown.
+        io.github.kotoba-lang/error {:git/sha "838dec56c9a5b74f9eec825a2fb28bda157f8cd3"}
         ;; kotoba.image replaced java.awt.image.BufferedImage / javax.imageio here (2026-09-25).
         ;; An explicit floor: tools.deps takes the NEWEST sha it is shown.
         io.github.kotoba-lang/image {:git/sha "ed0b4dc89268073384c9493bdc80fa72dc17500b"}

@@ -1,5 +1,5 @@
 (ns comfyui.nodes.diffusion-runtime-test
-  (:require [kotoba.image :as kotoba-image] [kotoba.bytes :as kbytes] [json.data-json :as json]
+  (:require [kotoba.lang.error :as kerror] [kotoba.image :as kotoba-image] [kotoba.bytes :as kbytes] [json.data-json :as json]
             [kotoba.test :refer [deftest is]]
             [comfyui.exec :as exec]
             [comfyui.clip.tokenizer :as clip-tokenizer]
@@ -230,7 +230,7 @@
     (is (not= (arr/->vec (:output normal-full))
               (arr/->vec (:output normal-partial))))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"denoise in"
+         kerror/ExceptionInfo #"denoise in"
          (let [workflow {"sample" {:class_type "KSampler"
                                      :inputs {:model model :positive zero :negative zero
                                               :latent_image zero :seed 1 :steps 2 :cfg 1.0
