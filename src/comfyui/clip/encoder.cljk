@@ -7,8 +7,19 @@
 (defn- fail [message data]
   (throw (ex-info (str "comfyui.clip.encoder: " message) data)))
 
+(defn- dtype [tensor] (or (:dtype tensor) :f32))
+
+(defn- cast-to [tensor target-dtype]
+  (if (= (dtype tensor) target-dtype) tensor (arr/cast tensor target-dtype)))
+
+(defn- softmax [tensor]
+  (cast-to (t/softmax (cast-to tensor :f32)) (dtype tensor)))
+
 (defn- linear [x weight bias]
-  (let [transposed (t/transpose weight)
+  (let [target-dtype (dtype weight)
+        x (cast-to x target-dtype)
+        bias (when bias (cast-to bias target-dtype))
+        transposed (t/transpose weight)
         multiplied (t/matmul x transposed)
         output (if bias (t/add multiplied bias) multiplied)]
     (arr/release! transposed)
@@ -128,7 +139,8 @@
               pooled-base (t/reshape (t/slice-axis output 1 eos-index (inc eos-index))
                                      [1 hidden-size])
               pooled (if text-projection
-                       (t/matmul pooled-base (tensor! text-projection))
+                       (cast-to (t/matmul pooled-base (tensor! text-projection))
+                                (dtype pooled-base))
                        pooled-base)]
           (arr/release! hidden)
           (when text-projection (arr/release! pooled-base))
@@ -152,7 +164,7 @@
                        (subvec (:shape right-tensor) 0 2))
             (fail "dual encoder batch/token dimensions differ"
                   {:left (:shape left-tensor) :right (:shape right-tensor)}))
-          (let [combined (t/cat [left-tensor right-tensor] 2)
+          (let [combined (t/cat [left-tensor (cast-to right-tensor (dtype left-tensor))] 2)
                 result (cond-> (assoc tokenized
                                       :tensor combined :pooled (:pooled right))
                          retain-encoder-outputs?

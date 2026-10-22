@@ -109,7 +109,7 @@
         [(arr/from-vec backend pixels [1 height width 3])
          (arr/from-vec backend mask [1 height width])]))))
 
-(defn- component [checkpoint kind prefixes]
+(defn- component [checkpoint kind prefixes checkpoint-dtype-policy]
   (let [names (filterv #(some (fn [prefix] (str/starts-with? % prefix)) prefixes)
                        (safe/tensor-names checkpoint))]
     {:comfyui/component kind
@@ -119,7 +119,8 @@
                             (when-not (some #{tensor-name} names)
                               (throw (ex-info "tensor does not belong to checkpoint component"
                                               {:component kind :tensor tensor-name})))
-                            (safe/read-tensor checkpoint backend tensor-name))}))
+                            (safe/read-tensor checkpoint backend tensor-name
+                                              {:dtype-policy checkpoint-dtype-policy}))}))
 
 (defn release-components!
   "Release all distinct compiled tensor caches and safetensors mappings owned
@@ -236,14 +237,17 @@
   - `:clip-tokenizer` OpenAI CLIP BPE tokenizer function
   - `:clip-spec` checkpoint transformer graph for CLIP encoding
   - `:alphas-cumprod` schedule vector, or a resolver function
+  - `:checkpoint-dtype-policy` `:f32` (default) or `:native`; native retains
+    checkpoint F16/BF16 weights in physical two-byte storage
 
   CheckpointLoaderSimple shares one SafeTensorFile across outputs; the
   Diffusers loader owns one file per component. The host closes each distinct
   `:comfyui/checkpoint` when the workflow/model unloads."
   [{:keys [backend resolve-checkpoint model-spec diffusers-config
            vae-spec diffusers-vae-config clip-spec alphas-cumprod
-           resolve-diffusers-pipeline input-directory output-directory clip-tokenizer]
-    :or {resolve-checkpoint identity}}]
+           resolve-diffusers-pipeline input-directory output-directory clip-tokenizer
+           checkpoint-dtype-policy]
+    :or {resolve-checkpoint identity checkpoint-dtype-policy :f32}}]
   [{:type "LoadImage"
     :category "image"
     :inputs {:image {:type "STRING"}}
@@ -261,9 +265,10 @@
                 (if (fn? diffusers-config)
                   (diffusers-config ckpt_name checkpoint) diffusers-config)
                 model-component (component checkpoint :model
-                                           (cond-> ["model.diffusion_model."
+                                            (cond-> ["model.diffusion_model."
                                                     "diffusion_model." "unet."]
-                                             resolved-diffusers-config (conj "")))
+                                             resolved-diffusers-config (conj ""))
+                                           checkpoint-dtype-policy)
                 architecture-info (architecture/infer checkpoint)
                 configured-spec (if (fn? model-spec)
                                   (model-spec ckpt_name checkpoint) model-spec)
@@ -306,7 +311,8 @@
                   alphas (assoc :comfyui/alphas-cumprod (vec alphas)))
                 vae-component (component checkpoint :vae
                                          (cond-> ["first_stage_model." "vae."]
-                                           resolved-diffusers-vae-config (conj "")))
+                                           resolved-diffusers-vae-config (conj ""))
+                                         checkpoint-dtype-policy)
                 executable-vae
                 (cond-> vae-component
                   decoder-spec
@@ -321,7 +327,8 @@
                 clip-component (component checkpoint :clip
                                           ["cond_stage_model." "text_encoder."
                                            "text_encoder_2." "conditioner.embedders."
-                                           "clip."])
+                                           "clip."]
+                                          checkpoint-dtype-policy)
                 executable-clip
                 (cond-> clip-component
                   resolved-clip-spec
