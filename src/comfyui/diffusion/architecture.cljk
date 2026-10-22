@@ -3,8 +3,17 @@
   names and shapes. No payload is decoded during inspection."
   (:require [kotoba.lang.text :as str]
             [comfyui.diffusion.scheduler :as scheduler]
-            [comfyui.safetensors :as safe])
-  (:import [java.util.regex Pattern]))
+            [comfyui.safetensors :as safe]))
+
+(defn- regex-quote
+  "Escape the regex metacharacters in `s` so it matches literally (the port of
+  java.util.regex.Pattern/quote; kbb/SCI resolves no JVM classnames)."
+  [s]
+  (apply str (map (fn [c]
+                    (if (contains? #{\\ \. \^ \$ \| \? \* \+ \( \) \[ \] \{ \}} c)
+                      (str "\\" c)
+                      (str c)))
+                  s)))
 
 (defn- find-name [names suffix]
   (first (filter #(str/ends-with? % suffix) names)))
@@ -116,13 +125,13 @@
 
 (defn- section-layout [names prefix section]
   (let [pattern (re-pattern
-                 (str "^" (Pattern/quote (str prefix section "."))
+                 (str "^" (regex-quote (str prefix section "."))
                       "(\\d+)\\.(\\d+)\\..+$"))
         blocks (indexed-values names pattern 1)]
     (mapv
      (fn [block]
        (let [block-pattern (re-pattern
-                            (str "^" (Pattern/quote (str prefix section "." block "."))
+                            (str "^" (regex-quote (str prefix section "." block "."))
                                  "(\\d+)\\..+$"))
              modules (indexed-values names block-pattern 1)]
          {:index block
@@ -212,7 +221,7 @@
   (when (= :spatial-transformer kind)
     (let [names (set (safe/tensor-names checkpoint))
           block-pattern (re-pattern
-                         (str "^" (Pattern/quote (str prefix "transformer_blocks."))
+                         (str "^" (regex-quote (str prefix "transformer_blocks."))
                               "(\\d+)\\.norm1\\.weight$"))
           indices (indexed-values names block-pattern 1)
           contiguous? (= indices (vec (range (count indices))))
@@ -334,7 +343,7 @@
           position-name (str root "embeddings.position_embedding.weight")
           layer-pattern (when root
                           (re-pattern
-                           (str "^" (Pattern/quote root)
+                           (str "^" (regex-quote root)
                                 "encoder\\.layers\\.(\\d+)\\.layer_norm1\\.weight$")))
           layer-indices (when layer-pattern
                           (->> names
@@ -400,7 +409,7 @@
   (let [token-name (str root "token_embedding.weight")
         position-name (str root "positional_embedding")
         layer-pattern (re-pattern
-                       (str "^" (Pattern/quote root)
+                       (str "^" (regex-quote root)
                             "transformer\\.resblocks\\.(\\d+)\\.ln_1\\.weight$"))
         indices (->> names
                      (keep #(some->> (re-matches layer-pattern %)

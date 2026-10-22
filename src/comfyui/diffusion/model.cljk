@@ -27,8 +27,20 @@
     (and (map? conditioning) (:shape conditioning) (:backend conditioning)) conditioning
     :else nil))
 
+(defn- dtype [tensor]
+  (or (:dtype tensor) :f32))
+
+(defn- cast-to [tensor target-dtype]
+  (if (= (dtype tensor) target-dtype) tensor (arr/cast tensor target-dtype)))
+
+(defn- softmax [tensor]
+  (cast-to (t/softmax (cast-to tensor :f32)) (dtype tensor)))
+
 (defn- linear [x weight bias]
-  (let [shape (:shape x)
+  (let [target-dtype (dtype weight)
+        x (cast-to x target-dtype)
+        bias (when bias (cast-to bias target-dtype))
+        shape (:shape x)
         features (long (peek shape))
         rows (quot (arr/nelems shape) features)
         matrix (if (= 2 (count shape)) x (t/reshape x [rows features]))
@@ -54,10 +66,12 @@
 
 (defn- sinusoidal-vector
   ([backend values embedding-dim]
-   (sinusoidal-vector backend values embedding-dim false 1.0))
+   (sinusoidal-vector backend values embedding-dim false 1.0 :f32))
   ([backend values embedding-dim flip-sin-to-cos?]
-   (sinusoidal-vector backend values embedding-dim flip-sin-to-cos? 1.0))
+   (sinusoidal-vector backend values embedding-dim flip-sin-to-cos? 1.0 :f32))
   ([backend values embedding-dim flip-sin-to-cos? frequency-shift]
+   (sinusoidal-vector backend values embedding-dim flip-sin-to-cos? frequency-shift :f32))
+  ([backend values embedding-dim flip-sin-to-cos? frequency-shift target-dtype]
   (when-not (and (even? embedding-dim) (>= embedding-dim 2))
     (fail "sinusoidal embedding dimension must be positive and even"
           {:dimension embedding-dim}))
@@ -74,14 +88,16 @@
                           cos (mapv #(Math/cos %) angles)]
                       (if flip-sin-to-cos? (concat cos sin) (concat sin cos))))
                   values))
-     [1 (* (count values) embedding-dim)]))))
+     [1 (* (count values) embedding-dim)]
+     target-dtype))))
 
 (defn- timestep-vector [value timestep tensor! layer]
   (let [first-weight (tensor! (:first-weight layer))
         input-dim (second (:shape first-weight))
         input (sinusoidal-vector (:backend value) [timestep] input-dim
                                  (boolean (:flip-sin-to-cos? layer))
-                                 (double (or (:frequency-shift layer) 1.0)))
+                                 (double (or (:frequency-shift layer) 1.0))
+                                 (dtype first-weight))
         first-projected (linear input first-weight (tensor! (:first-bias layer)))
         activated (t/silu first-projected)
         output (linear activated (tensor! (:second-weight layer))
@@ -101,9 +117,11 @@
       (fail "SDXL label embedding requires pooled [1 P] and six time IDs"
             {:pooled (some-> pooled :shape) :time-ids time-ids
              :expected-input expected-input}))
-    (let [time-embedding (sinusoidal-vector (:backend value) time-ids
-                                             (quot time-width 6))
-          input (t/cat [pooled time-embedding] 1)
+    (let [target-dtype (dtype first-weight)
+          time-embedding (sinusoidal-vector (:backend value) time-ids
+                                             (quot time-width 6) false 1.0
+                                             target-dtype)
+          input (t/cat [(cast-to pooled target-dtype) time-embedding] 1)
           first-projected (linear input first-weight (tensor! (:first-bias layer)))
           activated (t/silu first-projected)
           output (linear activated (tensor! (:second-weight layer))
@@ -366,7 +384,8 @@
         embedding (arr/from-vec (:backend value)
                                 (into (mapv #(Math/sin %) angles)
                                       (mapv #(Math/cos %) angles))
-                                [1 embedding-dim])
+                                [1 embedding-dim]
+                                (dtype first-weight))
         first-projected (linear embedding first-weight first-bias)
         hidden (t/silu first-projected)
         projected (linear hidden second-weight second-bias)
@@ -437,10 +456,16 @@
                         (let [tensor ((:comfyui/read-tensor component)
                                       backend tensor-name)]
                           (swap! cache assoc tensor-name tensor)
-                          tensor))))]
+                          tensor))))
+        first-tensor-name (first (filter string? (tree-seq coll? seq layers)))]
     (with-meta
       (fn [sample timestep conditioning]
-        (let [initial {:value sample :saved {} :embedding nil
+(let [input-dtype (dtype sample)
+              execution-dtype (if first-tensor-name
+                                (dtype (tensor! first-tensor-name))
+                                input-dtype)
+              sample (cast-to sample execution-dtype)
+              initial {:value sample :saved {} :embedding nil
                        :saved-uses initial-saved-uses}
               result
               (reduce
@@ -505,7 +530,8 @@
                      (when-not (= (:shape value) (:shape condition))
                        (fail "conditioning shape mismatch"
                              {:value (:shape value) :conditioning (:shape condition)}))
-                     (assoc state :value (nm/add value condition)))
+                     (assoc state :value
+                            (nm/add value (cast-to condition (dtype value)))))
 
                    :cross-attention
                    (assoc state :value
@@ -549,7 +575,7 @@
 
                    :timestep-bias
                    (let [bias (* (double (or (:scale layer) 1.0)) (double timestep))
-                         scalar (arr/from-vec (:backend value) [bias] [])]
+                         scalar (arr/from-vec (:backend value) [bias] [] (dtype value))]
                      (assoc state :value (t/add value scalar))))
                        consumed-name (when (#{:add-saved :cat-saved} (:op layer))
                                        (:name layer))
@@ -588,7 +614,7 @@
           (when (and same-shape? (not= (:shape sample) (:shape output)))
             (fail "epsilon output shape must equal sample shape"
                   {:sample (:shape sample) :output (:shape output)}))
-          output))
+          (cast-to output input-dtype)))
       {:comfyui/model-spec spec :comfyui/tensor-cache cache})))
 
 (defn compile-denoiser
